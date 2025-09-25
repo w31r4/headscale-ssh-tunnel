@@ -1,6 +1,8 @@
-# Headscale SSH 隧道连接脚本
+# Headscale SSH 隧道连接脚本 (v3.0)
 
-本项目提供一个 Shell 脚本 `hs-connect.sh`，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
+本项目提供一个高度健壮的 Shell 脚本 `hs-connect.sh`，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
+
+与普通脚本不同，本项目注重**易用性**、**健壮性**和**安全性**，内置了完整的配置引导、环境检查和进程管理机制。
 
 ## 核心原理
 
@@ -15,22 +17,44 @@
 整个过程可以简化为：
 `Tailscale 客户端 -> 本地 443 端口 -> SSH 隧道 -> Headscale 服务器 -> Headscale 服务`
 
+## 特性
+
+- **配置与逻辑分离**：通过 `config.sh` 管理所有个人配置，脚本更新不影响配置。
+- **自动环境检查**：启动前自动检查 `tailscale`, `ssh`, `nc` 等依赖，以及 `/etc/hosts` 文件配置。
+- **精确的进程管理**：使用 PID 文件 (`/var/run/hs-connect.pid`) 精确控制隧道进程，避免误操作。
+- **健壮的错误处理**：在每一步都进行验证，并在失败时提供清晰的指引。
+- **优雅的退出机制**：通过 `trap` 捕获中断信号，确保任何情况下都能清理残留进程。
+- **状态检查**：提供 `status` 命令，快速了解隧道和节点的当前状态。
+
+## 配置步骤
+
+1.  **复制配置文件**
+    将配置文件模板 `config.sh.example` 复制为 `config.sh`。
+    ```bash
+    cp config.sh.example config.sh
+    ```
+
+2.  **编辑配置文件**
+    打开 `config.sh` 文件，并填入您自己的信息：
+    - `SERVER_IP`: 您的云服务器的公网 IP 地址。
+    - `HEADSCALE_DOMAIN`: 您的 Headscale 服务的域名。
+    - `SSH_USER`: 您用于登录云服务器的 SSH 用户名。
+    - `SSH_KEY_PATH`: 您在本地机器上存放的 SSH 私钥的绝对路径 (例如：`/home/user/.ssh/id_rsa`)。
+    - `USER`: 您在 Headscale 中为该设备指定的用户名（或称 Namespace）。
+
 ## 前提条件
 
-在使用此脚本前，请确保您已完成以下配置：
+在运行脚本前，请确保您已完成以下配置。脚本会自动检查这些条件，并在不满足时给出提示。
 
 1.  **修改 Hosts 文件**：
-    在您的 **本地客户端机器** 上，编辑 `/etc/hosts` 文件 (需要 `sudo` 权限)，添加以下行，将您的 Headscale 域名指向本地回环地址：
+    在您的 **本地客户端机器** 上，编辑 `/etc/hosts` 文件 (需要 `sudo` 权限)，添加以下行：
     ```
     127.0.0.1 your.headscale.domain.com
     ```
-    例如：
-    ```
-    127.0.0.1 headscale.zflink.site
-    ```
+    *(脚本会自动检查该配置是否存在)*
 
 2.  **配置 SSH 免密登录**：
-    确保您可以从本地机器通过 SSH 密钥免密码登录到您的 Headscale 服务器。如果尚未配置，请先生成 SSH 密钥并将公钥添加到服务器的 `~/.ssh/authorized_keys` 文件中。
+    确保您可以从本地机器通过 SSH 密钥免密码登录到您的 Headscale 服务器。
 
 3.  **SSH Agent 配置**：
     脚本会检查您的 SSH Agent 中是否已加载私钥。在运行脚本前，请确保执行了以下命令来加载密钥：
@@ -39,34 +63,46 @@
     ssh-add /path/to/your/private_key
     ```
 
-## 配置说明
-
-在首次使用 `hs-connect.sh` 脚本前，请打开脚本文件并修改以下变量：
-
--   `SERVER_IP`: 您的云服务器的公网 IP 地址。
--   `HEADSCALE_DOMAIN`: 您的 Headscale 服务的域名。
--   `SSH_USER`: 您用于登录云服务器的 SSH 用户名。
--   `SSH_KEY_PATH`: 您在本地机器上存放的 SSH 私钥的绝对路径 (例如：`/home/user/.ssh/id_rsa`)。
--   `USER`: 您在 Headscale 中为该设备指定的用户名（或称 Namespace）。
-
 ## 用法
 
-将脚本放置在任意目录，并为其添加可执行权限：
+为脚本添加可执行权限：
 ```bash
 chmod +x hs-connect.sh
 ```
 
 ### 启动隧道并激活节点
-
-使用 `sudo` 权限运行 `start` 命令。脚本会自动完成获取预授权密钥、建立隧道和激活 Tailscale 节点的全部流程。
-
 ```bash
 sudo ./hs-connect.sh start
 ```
 
 ### 关闭隧道
-
-当您不再需要连接时，运行 `stop` 命令来关闭 SSH 隧道，释放本地端口。
-
 ```bash
 sudo ./hs-connect.sh stop
+```
+
+### 检查连接状态
+```bash
+sudo ./hs-connect.sh status
+```
+
+## 故障排查
+
+- **错误: 配置文件 'config.sh' 未找到!**
+  -> 您需要将 `config.sh.example` 复制为 `config.sh` 并填写您的配置。
+
+- **错误: /etc/hosts 文件缺少必要的条目。**
+  -> 请按照“前提条件”中的说明，编辑 `/etc/hosts` 文件。
+
+- **错误：缺少核心依赖 'xxx'。**
+  -> 请根据提示安装缺失的命令行工具。例如，在 Debian/Ubuntu 上：`sudo apt-get install openssh-client netcat-openbsd`。
+
+- **错误：未能从服务器获取有效的预授权密钥。**
+  -> 请检查：
+    1.  `config.sh` 中的服务器信息和 Headscale 用户名是否正确。
+    2.  您的 SSH 免密登录是否仍然有效。
+    3.  服务器上的 Headscale 服务是否正在正常运行。
+
+- **错误：SSH 隧道在10秒内未能成功监听端口 443。**
+  -> 请检查：
+    1.  本地的 `443` 端口是否已被其他程序占用 (`sudo lsof -i:443`)。
+    2.  服务器的防火墙是否允许 SSH 连接。
