@@ -137,11 +137,18 @@ start_and_activate() {
     echo "--- 准备工作: 确保 tailscale 处于关闭状态 ---"
     tailscale down >/dev/null 2>&1
     
-    if ! ssh-add -l >/dev/null; then
-        echo "❌ 错误：SSH Agent 中没有已加载的密钥。"
-        echo "   -> 请先执行以下命令加载您的 SSH 密钥，然后再重新运行此脚本："
-        echo "      eval \$(ssh-agent -s)"
-        echo "      ssh-add $SSH_KEY_PATH"
+    if ! ssh-add -l >/dev/null 2>&1; then
+        # 检查是否在 sudo 环境下，并且 SSH_AUTH_SOCK 丢失
+        if [[ -n "$SUDO_USER" ]] && [[ -z "$SSH_AUTH_SOCK" ]]; then
+            echo "❌ 错误：在 sudo 环境下无法连接到 SSH Agent。"
+            echo "   -> 这是因为 sudo 默认会重置环境变量。"
+            echo "   -> 请尝试使用 'sudo -E' 来运行此脚本，以保留您的用户环境:"
+            echo "      sudo -E ./hs-connect.sh $1"
+        else
+            echo "❌ 错误：SSH Agent 中没有已加载的密钥，或无法连接。"
+            echo "   -> 请确保您的 SSH 密钥已通过 'ssh-add' 加载。"
+            echo "   -> 如果您正在使用 sudo，请尝试 'sudo -E'。"
+        fi
         exit 1
     fi
 
@@ -193,8 +200,10 @@ check_status() {
     fi
 
     # 2. 检查 Tailscale 节点状态
-    if tailscale ip -4 &>/dev/null; then
-        local TS_IP=$(tailscale ip -4)
+    # 'tailscale status' 的退出代码比 'tailscale ip' 更能准确反映服务状态
+    if tailscale status &>/dev/null; then
+        local TS_IP
+        TS_IP=$(tailscale ip -4) || TS_IP="获取中..."
         echo "✅ Tailscale 节点: 在线 (IP: $TS_IP)"
         echo ""
         tailscale status
