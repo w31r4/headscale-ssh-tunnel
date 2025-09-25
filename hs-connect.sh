@@ -12,22 +12,92 @@
 
 # --- 脚本核心逻辑 ---
 
-# 获取脚本所在目录，以便定位配置文件
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
-CONFIG_FILE="$SCRIPT_DIR/config.sh"
-PID_FILE="/var/run/hs-connect.pid"
-
-# 检查配置文件是否存在
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "❌ 错误：配置文件 'config.sh' 未找到！"
-    echo "   -> 请将 'config.sh.example' 复制为 'config.sh'，并填入您的配置信息。"
-    exit 1
+# --- Auto-elevation to root ---
+# If not running as root, re-execute with sudo -E to preserve environment
+if [[ $EUID -ne 0 ]]; then
+   echo "脚本需要 root 权限，正在尝试使用 sudo 自动提权..."
+   # Use exec to replace the current process with the new one
+   exec sudo -E "$0" "$@"
 fi
 
-# 加载配置
-source "$CONFIG_FILE"
+# --- Configuration and Setup ---
 
-# 检查依赖
+# Define config paths. When under sudo, HOME is /root, so we need the real user's home.
+# SUDO_USER is set by sudo. If not set, we are not in sudo, but the root check above handles that.
+REAL_HOME=$(getent passwd "${SUDO_USER:-$(whoami)}" | cut -d: -f6)
+USER_CONFIG_DIR="$REAL_HOME/.config/hs-connect"
+USER_CONFIG_FILE="$USER_CONFIG_DIR/config.sh"
+SYSTEM_CONFIG_FILE="/etc/hs-connect/config.sh"
+PID_FILE="/var/run/hs-connect.pid"
+
+# Interactive first-run setup function
+setup_config() {
+    echo "--- 首次运行配置向导 ---"
+    echo "未找到配置文件，让我们现在创建一个。"
+    echo "将在 '$USER_CONFIG_FILE' 创建新的配置文件。"
+    echo ""
+
+    # Prompt for user input
+    read -p "请输入 Headscale 服务器的 IP 地址 (SERVER_IP): " SERVER_IP
+    read -p "请输入 Headscale 的域名 (HEADSCALE_DOMAIN): " HEADSCALE_DOMAIN
+    read -p "请输入用于 SSH 登录的用户名 (SSH_USER): " SSH_USER
+    read -p "请输入 SSH 密钥的绝对路径 (SSH_KEY_PATH) [默认: $REAL_HOME/.ssh/id_rsa]: " SSH_KEY_PATH
+    SSH_KEY_PATH=${SSH_KEY_PATH:-"$REAL_HOME/.ssh/id_rsa"}
+    read -p "请输入要创建预授权密钥的 Headscale 用户名 (USER): " USER
+
+    # Create config directory and set ownership
+    echo "-> 正在创建配置目录: $USER_CONFIG_DIR"
+    mkdir -p "$USER_CONFIG_DIR"
+    chown -R "$SUDO_USER:$SUDO_GID" "$USER_CONFIG_DIR"
+
+    # Write config file and set ownership
+    echo "-> 正在写入配置文件..."
+    # Use a temporary file to avoid permission issues with cat redirection
+    local temp_config
+    temp_config=$(mktemp)
+    cat > "$temp_config" << EOL
+#!/bin/bash
+# Headscale 连接配置
+
+# Headscale 服务器的 IP 地址
+SERVER_IP="$SERVER_IP"
+
+# Headscale 的域名
+HEADSCALE_DOMAIN="$HEADSCALE_DOMAIN"
+
+# 用于 SSH 登录的用户名
+SSH_USER="$SSH_USER"
+
+# SSH 密钥的绝对路径
+SSH_KEY_PATH="$SSH_KEY_PATH"
+
+# Headscale 用户名 (用于创建 pre-auth key)
+USER="$USER"
+EOL
+    
+    mv "$temp_config" "$USER_CONFIG_FILE"
+    chown "$SUDO_USER:$SUDO_GID" "$USER_CONFIG_FILE"
+
+    echo ""
+    echo "✅ 配置已成功保存到 '$USER_CONFIG_FILE'。"
+    echo "   请重新运行您之前的命令，例如: $0 $1"
+    exit 0
+}
+
+# Load configuration
+if [ -f "$USER_CONFIG_FILE" ]; then
+    source "$USER_CONFIG_FILE"
+elif [ -f "$SYSTEM_CONFIG_FILE" ]; then
+    source "$SYSTEM_CONFIG_FILE"
+else
+    # If no config is found, run the setup wizard.
+    # This part is reached only when running as root (due to auto-elevation).
+    setup_config "$@"
+fi
+
+# --- Dependency and Environment Checks ---
+
+# Check dependencies
 check_dependencies() {
     local missing_deps=0
     for cmd in tailscale nc ssh ssh-add; do
@@ -41,8 +111,9 @@ check_dependencies() {
     fi
 }
 
-# 检查 /etc/hosts 文件
+# Check /etc/hosts file
 check_hosts_file() {
+    # This check can only run after config is loaded
     local expected_entry="127.0.0.1 $HEADSCALE_DOMAIN"
     if ! grep -q "$expected_entry" /etc/hosts; then
         echo "❌ 错误: /etc/hosts 文件缺少必要的条目。"
@@ -52,16 +123,9 @@ check_hosts_file() {
     fi
 }
 
-# --- 主逻辑执行前 ---
+# --- Run pre-flight checks ---
 check_dependencies
 check_hosts_file
-
-# 检查脚本是否以 root/sudo 权限运行
-if [[ $EUID -ne 0 ]]; then
-   echo "错误：此脚本需要使用 sudo 权限运行。"
-   echo "用法: sudo ./hs-connect.sh [start|stop|status]"
-   exit 1
-fi
 
 # --- 业务逻辑函数 ---
 
@@ -212,6 +276,28 @@ check_status() {
     fi
 }
 
+# 显示帮助信息
+show_help() {
+    echo "hs-connect: Headscale SSH 隧道连接工具"
+    echo ""
+    echo "一个用于通过 SSH 隧道安全连接到 Headscale 的命令行工具。"
+    echo ""
+    echo "用法:"
+    echo "  hs-connect <command>"
+    echo ""
+    echo "可用命令:"
+    echo "  start     启动 SSH 隧道并激活 Headscale 节点"
+    echo "  stop      关闭 SSH 隧道并清理进程"
+    echo "  status    检查隧道和节点的当前连接状态"
+    echo "  help      显示此帮助信息"
+    echo ""
+    echo "示例:"
+    echo "  hs-connect start"
+    echo "  hs-connect status"
+    echo ""
+    echo "该工具会自动使用 sudo 获取所需权限。首次运行时将引导您完成配置。"
+}
+
 # 根据用户输入的参数执行操作
 case "$1" in
     start)
@@ -223,9 +309,12 @@ case "$1" in
     status)
         check_status
         ;;
+    h|help|-h|--help)
+        show_help
+        exit 0
+        ;;
     *)
-        echo "用法:"
-        echo "  sudo ./hs-connect.sh [start|stop|status]"
+        show_help
         exit 1
         ;;
 esac
