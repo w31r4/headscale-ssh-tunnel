@@ -28,9 +28,19 @@
 #>
 [CmdletBinding()]
 param (
-    [Parameter(Mandatory = $false, Position = 0)]
-    [ValidateSet('start', 'stop', 'status', 'help')]
-    [string]$Command = 'help'
+    [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Commands')]
+    [ValidateSet('start', 'stop', 'status', 'help', 'activate', 'link')]
+    [string]$Command,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'LinkCommand')]
+    [string]$Key,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Commands')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'LinkCommand')]
+    [string]$Expiration = '8h',
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Commands')]
+    [int]$Port = 0
 )
 
 # --- 自动提权 ---
@@ -68,11 +78,15 @@ function Setup-Config {
         SSH_USER         = Read-Host "请输入用于 SSH 登录的用户名 (SSH_USER)"
         SSH_KEY_PATH     = Read-Host "请输入 SSH 密钥的绝对路径 (SSH_KEY_PATH) [默认: ~\ssh\id_rsa]"
         USER             = Read-Host "请输入要创建预授权密钥的 Headscale 用户名 (USER)"
+        TUNNEL_PORT      = Read-Host "请输入用于 SSH 隧道的本地端口 (TUNNEL_PORT) [默认: 443]"
     }
 
     # 处理默认值
     if ([string]::IsNullOrWhiteSpace($params.SSH_KEY_PATH)) {
         $params.SSH_KEY_PATH = Join-Path $HOME ".ssh\id_rsa"
+    }
+    if ([string]::IsNullOrWhiteSpace($params.TUNNEL_PORT)) {
+        $params.TUNNEL_PORT = 443
     }
 
     # 创建配置目录
@@ -161,9 +175,21 @@ function main {
         Test-HostsFile
     }
 
-    switch ($Command) {
+    # 确定实际执行的命令
+    $effectiveCommand = $Command
+    if ($PSCmdlet.ParameterSetName -eq 'LinkCommand') {
+        $effectiveCommand = 'link'
+    }
+
+    switch ($effectiveCommand) {
         'start' {
-            Start-AndActivate
+            Start-AndActivate -Port $Port -Expiration $Expiration
+        }
+        'activate' {
+            Activate-Only -Expiration $Expiration
+        }
+        'link' {
+            Link-Node -AuthKey $Key
         }
         'stop' {
             Stop-SshTunnel
@@ -183,8 +209,11 @@ function main {
 # --- 业务逻辑函数 ---
 
 function Get-AuthKey {
-    Write-Host "`n--- 第1步: 远程获取8小时临时预授权密钥 ---" -ForegroundColor Yellow
-    $sshCommand = "sudo headscale preauthkeys create --user $($Global:Config.USER) --ephemeral --expiration 8h"
+    param (
+        [string]$Expiration = '8h'
+    )
+    Write-Host "`n--- 第1步: 远程获取临时预授权密钥 (有效期: $Expiration) ---" -ForegroundColor Yellow
+    $sshCommand = "sudo headscale preauthkeys create --user $($Global:Config.USER) --ephemeral --expiration $Expiration"
     $sshArgs = @(
         "-i", $Global:Config.SSH_KEY_PATH,
         "$($Global:Config.SSH_USER)@$($Global:Config.SERVER_IP)",
@@ -208,7 +237,7 @@ function Get-AuthKey {
 
         # 如果成功找到了密钥，就直接返回，忽略其他所有输出（包括无害的错误信息）
         if ($key) {
-            Write-Host "   -> 成功获取到8小时临时密钥: $($key.Substring(0, 12))..." -ForegroundColor Green
+            Write-Host "   -> 成功获取到密钥: $($key.Substring(0, 12))..." -ForegroundColor Green
             return $key
         }
         
@@ -230,11 +259,24 @@ function Get-AuthKey {
 }
 
 function Start-SshTunnel {
-    Write-Host "`n--- 第2步: 启动 SSH 隧道 ---" -ForegroundColor Yellow
+    param (
+        [int]$Port
+    )
+
+    # 决定端口
+    $tunnelPort = $Port
+    if ($tunnelPort -eq 0) {
+        $tunnelPort = $Global:Config.TUNNEL_PORT
+    }
+    if (-not $tunnelPort -or $tunnelPort -eq 0) {
+        $tunnelPort = 443 # 最终回退值
+    }
+
+    Write-Host "`n--- 第2步: 启动 SSH 隧道 (端口: $tunnelPort) ---" -ForegroundColor Yellow
     
     Write-Host "   -> 正在后台启动 SSH 隧道..."
     $sshArgs = @(
-        "-L", "443:localhost:443",
+        "-L", "$($tunnelPort):localhost:443",
         "-i", $Global:Config.SSH_KEY_PATH,
         "-N", # 不执行远程命令
         "-o", "ExitOnForwardFailure=yes",
@@ -250,14 +292,14 @@ function Start-SshTunnel {
         return $false
     }
 
-    Write-Host "   -> 正在验证隧道端口(443)是否可用..."
+    Write-Host "   -> 正在验证隧道端口($tunnelPort)是否可用..."
     $timeout = 5
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     $tunnelReady = $false
     $sshPid = $null
 
     while ($timer.Elapsed.TotalSeconds -lt $timeout) {
-        $connection = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
+        $connection = Get-NetTCPConnection -LocalPort $tunnelPort -State Listen -ErrorAction SilentlyContinue
         if ($connection) {
             $sshPid = $connection.OwningProcess
             if ($sshPid -eq $process.Id) {
@@ -270,11 +312,13 @@ function Start-SshTunnel {
     $timer.Stop()
 
     if ($tunnelReady) {
-        $sshPid | Set-Content -Path $PidFile
+        # 确保 $sshPid 是单个值
+        $singleSshPid = $sshPid | Select-Object -First 1
+        "$singleSshPid`:$tunnelPort" | Set-Content -Path $PidFile
         Write-Host "   -> SSH 隧道已启动，进程 PID: $sshPid" -ForegroundColor Green
         return $true
     } else {
-        Write-Error "   -> 错误：SSH 隧道已启动 (PID: $($process.Id))，但在 $timeout 秒内无法验证端口 443 的监听状态。"
+        Write-Error "   -> 错误：SSH 隧道已启动 (PID: $($process.Id))，但在 $timeout 秒内无法验证端口 $tunnelPort 的监听状态。"
         Write-Host "   -> 这可能是一个临时问题或配置错误。请检查防火墙或 SSH 服务器日志。"
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         return $false
@@ -308,22 +352,20 @@ function Invoke-NodeActivation($authKey) {
 }
 
 function Start-AndActivate {
+    param (
+        [int]$Port,
+        [string]$Expiration
+    )
     Write-Host "--- 准备工作: 清理旧的连接和进程 ---" -ForegroundColor Yellow
     tailscale down | Out-Null
     Stop-SshTunnel # 确保端口和进程是干净的
 
-    # 检查 SSH Agent 中是否有密钥
-    if ((ssh-add -l 2>$null).Count -eq 0) {
-        Write-Error "❌ 错误：SSH Agent 中没有已加载的密钥。"
-        Write-Host "   -> 请在运行此脚本前，确保您已在 PowerShell 中执行 'ssh-add' 加载了正确的密钥。"
-        Write-Host "   -> 例如: ssh-add ~\.ssh\id_rsa"
-        exit 1
-    }
+    Test-SshAgent
 
-    $authKey = Get-AuthKey
+    $authKey = Get-AuthKey -Expiration $Expiration
     if (-not $authKey) { exit 1 }
 
-    if (-not (Start-SshTunnel)) {
+    if (-not (Start-SshTunnel -Port $Port)) {
         Stop-SshTunnel
         exit 1
     }
@@ -334,38 +376,97 @@ function Start-AndActivate {
     }
 }
 
+function Activate-Only {
+    param (
+        [string]$Expiration
+    )
+    Write-Host "--- 准备工作: 仅激活节点 ---" -ForegroundColor Yellow
+
+    Test-SshAgent
+
+    $authKey = Get-AuthKey -Expiration $Expiration
+    if (-not $authKey) { exit 1 }
+
+    if (-not (Invoke-NodeActivation -authKey $authKey)) {
+        exit 1
+    }
+}
+
+function Link-Node {
+    param (
+        [string]$AuthKey,
+        [int]$Port
+    )
+    Write-Host "--- 准备工作: 使用已有密钥直接激活 ---" -ForegroundColor Yellow
+
+    if ([string]::IsNullOrWhiteSpace($AuthKey) -or -not ($AuthKey -match '^[a-f0-9]{48}$')) {
+        Write-Error "❌ 错误: 'link' 命令需要一个有效的48位十六进制预授权密钥。"
+        Write-Host "   -> 用法: .\hs-connect.ps1 link -Key <your-pre-auth-key> [-Port <端口>]"
+        exit 1
+    }
+
+    # 检查隧道状态，如果不存在则启动
+    if (-not (Is-Tunnel-Running)) {
+        Write-Host "   -> 未检测到活动的 SSH 隧道，正在尝试启动一个..."
+        if (-not (Start-SshTunnel -Port $Port)) {
+            Stop-SshTunnel
+            exit 1
+        }
+    }
+    else {
+        Write-Host "   -> 检测到已存在的 SSH 隧道，将直接使用。"
+    }
+
+    if (-not (Invoke-NodeActivation -authKey $AuthKey)) {
+        exit 1
+    }
+}
+
+function Test-SshAgent {
+    if ((ssh-add -l 2>$null).Count -eq 0) {
+        Write-Error "❌ 错误：SSH Agent 中没有已加载的密钥。"
+        Write-Host "   -> 请在运行此脚本前，确保您已在 PowerShell 中执行 'ssh-add' 加载了正确的密钥。"
+        Write-Host "   -> 例如: ssh-add ~\.ssh\id_rsa"
+        exit 1
+    }
+}
+
 function Stop-SshTunnel {
     Write-Host "--- 正在关闭 SSH 隧道 ---" -ForegroundColor Yellow
     $tunnelKilled = $false
 
     # 1. 尝试通过 PID 文件关闭
     if (Test-Path $PidFile) {
-        $pid = Get-Content $PidFile
-        if ($pid -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
-            Stop-Process -Id $pid -Force
-            Write-Host "   -> 隧道进程 (PID: $pid) 已通过 PID 文件关闭。"
+        # Get-Content 可能会返回一个字符串数组，我们只取第一个非空行
+        $pidInfo = (Get-Content $PidFile | Where-Object { $_ -ne "" })[0]
+        # 解析出 PID，并去除可能存在的多余空格
+        $processId = ($pidInfo -split ':')[0].Trim()
+        
+        if ($processId -and (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+            Stop-Process -Id $processId -Force
+            Write-Host "   -> 隧道进程 (PID: $processId) 已通过 PID 文件关闭。"
             $tunnelKilled = $true
         } else {
-            Write-Host "   -> PID 文件中的进程 ($pid) 无效或已不存在。"
+            Write-Host "   -> PID 文件中的进程 ($processId) 无效或已不存在。"
         }
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "   -> 未找到 PID 文件，将尝试通过端口查找。"
     }
 
-    # 2. 强制检查并关闭任何占用 443 端口的 SSH 隧道进程
-    $zombieConnection = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
-    if ($zombieConnection) {
-        $process = Get-Process -Id $zombieConnection.OwningProcess -ErrorAction SilentlyContinue
-        if ($process -and $process.ProcessName -eq 'ssh') {
-            Write-Host "   -> 发现残留的 SSH 隧道进程 (PID: $($process.Id)) 正在监听 443 端口，正在强制关闭..." -ForegroundColor Yellow
-            Stop-Process -Id $process.Id -Force
+    # 2. 强制检查并关闭任何残留的 SSH 隧道进程
+    $zombieConnections = Get-NetTCPConnection -State Listen | Where-Object { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName -eq 'ssh' }
+    if ($zombieConnections) {
+        foreach ($conn in $zombieConnections) {
+            $processId = $conn.OwningProcess
+            Write-Host "   -> 发现残留的 SSH 隧道进程 (PID: $processId) 正在监听 $($conn.LocalPort) 端口，正在强制关闭..." -ForegroundColor Yellow
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
-            if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
-                Write-Host "   -> 残留进程 (PID: $($process.Id)) 已被强制关闭。"
+            if (-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                Write-Host "   -> 残留进程 (PID: $processId) 已被强制关闭。"
                 $tunnelKilled = $true
             } else {
-                Write-Warning "   -> 警告：无法关闭残留的隧道进程 (PID: $($process.Id))。请手动检查。"
+                Write-Warning "   -> 警告：无法关闭残留的隧道进程 (PID: $processId)。请手动检查。"
             }
         }
     }
@@ -382,22 +483,8 @@ function Get-ConnectionStatus {
     Write-Host "--- 检查连接状态 ---" -ForegroundColor Yellow
     
     # 1. 检查 SSH 隧道
-    $tunnelRunning = $false
-    if (Test-Path $PidFile) {
-        $pid = Get-Content $PidFile
-        if ($pid -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
-            Write-Host "✅ SSH 隧道: 正在运行 (PID: $pid)" -ForegroundColor Green
-            $tunnelRunning = $true
-        }
-    }
-    if (-not $tunnelRunning) {
-        # 即使没有 PID 文件，也检查一下端口
-        $connection = Get-NetTCPConnection -LocalPort 443 -State Listen -ErrorAction SilentlyContinue
-        if ($connection) {
-            Write-Host "✅ SSH 隧道: 正在运行 (PID: $($connection.OwningProcess)) - [通过端口检测]" -ForegroundColor Green
-        } else {
-            Write-Host "❌ SSH 隧道: 未运行" -ForegroundColor Red
-        }
+    if (-not (Is-Tunnel-Running -Verbose)) {
+        Write-Host "❌ SSH 隧道: 未运行" -ForegroundColor Red
     }
 
     # 2. 检查 Tailscale 节点状态
@@ -417,24 +504,70 @@ function Get-ConnectionStatus {
     }
 }
 
+function Is-Tunnel-Running {
+    param(
+        [switch]$Verbose
+    )
+    # 1. 尝试通过 PID 文件检查
+    $pidInfo = if (Test-Path $PidFile) { (Get-Content $PidFile | Where-Object { $_ -ne "" })[0] } else { $null }
+    if ($pidInfo) {
+        $processId = ($pidInfo -split ':')[0].Trim()
+        if ($processId -and (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+            if ($Verbose) {
+                $port = ($pidInfo -split ':')[1]
+                Write-Host "✅ SSH 隧道: 正在运行 (PID: $processId, 端口: $port) [通过PID文件检测]" -ForegroundColor Green
+            }
+            return $true
+        }
+    }
+
+    # 2. 如果 PID 文件无效或不存在，则通过端口检测
+    $sshProcesses = Get-Process -Name ssh -ErrorAction SilentlyContinue
+    if ($sshProcesses) {
+        $listeningConnections = Get-NetTCPConnection -State Listen
+        foreach ($proc in $sshProcesses) {
+            $connection = $listeningConnections | Where-Object { $_.OwningProcess -eq $proc.Id }
+            if ($connection) {
+                if ($Verbose) {
+                    Write-Host "✅ SSH 隧道: 正在运行 (PID: $($proc.Id), 端口: $($connection.LocalPort)) - [通过端口检测]" -ForegroundColor Green
+                }
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
 function Show-Help {
     Write-Host @"
-hs-connect: Headscale SSH 隧道连接工具 (PowerShell版)
+hs-connect: Headscale SSH 隧道连接工具 (PowerShell版 v3.2)
 
 一个用于通过 SSH 隧道安全连接到 Headscale 的命令行工具。
 
 用法:
-  .\hs-connect.ps1 <command>
+  .\hs-connect.ps1 <Command> [Options]
 
 可用命令:
-  start     启动 SSH 隧道并激活 Headscale 节点
-  stop      关闭 SSH 隧道并清理进程
-  status    检查隧道和节点的当前连接状态
-  help      显示此帮助信息
+  start               启动 SSH 隧道并激活 Headscale 节点
+    -Port <端口>      临时指定 SSH 隧道的本地端口 (覆盖配置)
+    -Expiration <时长>  临时指定预授权密钥的有效期 (例如: 12h, 30d)
+
+  stop                关闭 SSH 隧道并清理进程
+  status              检查隧道和节点的当前连接状态
+
+  activate            仅获取密钥并激活节点 (用于共享已存在的隧道)
+    -Expiration <时长>  临时指定预授权密钥的有效期
+
+  link -Key <密钥>    使用已有的密钥激活节点 (如果隧道不存在会自动启动)
+    -Port <端口>      在自动启动隧道时指定端口
+
+  help                显示此帮助信息
 
 示例:
   .\hs-connect.ps1 start
-  .\hs-connect.ps1 status
+  .\hs-connect.ps1 start -Port 10443 -Expiration 30d
+  .\hs-connect.ps1 link -Key <your-pre-auth-key>
 
 该工具会自动请求所需的管理员权限。首次运行时将引导您完成配置。
 "@

@@ -1,4 +1,4 @@
-# Headscale SSH 隧道连接工具 (v3.1)
+# Headscale SSH 隧道连接工具 (v3.2)
 
 本项目提供一个名为 `hs-connect` 的命令行工具，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
 
@@ -52,24 +52,86 @@
 
 ## 用法
 
-安装完成后，您可以在任何地方直接使用 `hs-connect` 命令。
+安装完成后，您可以在任何地方直接使用 `hs-connect` 命令。如果这是您第一次运行，工具会启动一个交互式的设置向导。
 
-如果这是您第一次运行，工具会启动一个交互式的设置向导，引导您完成配置。
+### 可用命令
 
-### 启动隧道并激活节点
+#### 启动隧道并激活节点
 ```bash
+hs-connect start [options]
+```
+- **描述**: 这是最常用的命令。它会清理旧进程、获取预授权密钥、建立 SSH 隧道，并激活本地 Tailscale 节点。
+- **选项**:
+  - `--port <端口号>`: 临时指定隧道的本地端口，覆盖配置文件中的 `TUNNEL_PORT`。适用于需要动态端口的场景（例如 WSL2 Mirrored 网络模式）。
+  - `--expiration <时长>`: 指定预授权密钥的有效期，例如 `12h` (12 小时), `30d` (30 天)。默认为 `8h`。
+
+**示例：**
+```bash
+# 使用默认配置启动
 hs-connect start
+
+# 在 WSL 中使用，将隧道建立在 10443 端口，并设置密钥有效期为30天
+hs-connect start --port 10443 --expiration 30d
 ```
 
-### 关闭隧道
+#### 关闭隧道
 ```bash
 hs-connect stop
 ```
+- **描述**: 关闭由 `hs-connect` 启动的 SSH 隧道并清理所有相关进程。
 
-### 检查连接状态
+#### 检查连接状态
 ```bash
 hs-connect status
 ```
+- **描述**: 检查 SSH 隧道和 Tailscale 节点的当前状态。
+
+#### 仅激活节点
+```bash
+hs-connect activate [options]
+```
+- **描述**: 此命令仅获取预授权密钥并激活节点，它**不会**创建新的 SSH 隧道。适用于多个客户端（例如 Windows 和 WSL）共享同一个隧道的情况。
+- **选项**:
+  - `--expiration <时长>`: 指定预授权密钥的有效期。
+
+#### 使用已有密钥激活
+```bash
+hs-connect link <预授权密钥> [--port <端口号>]
+```
+- **描述**: 直接使用一个已经存在的预授权密钥来激活节点。此命令非常智能：它会先检查 SSH 隧道是否存在，如果不存在，则会自动为您启动一个。
+- **选项**:
+  - `--port <端口号>`: 在自动启动隧道时，可以临时指定一个端口。
+- **示例**:
+  ```bash
+  hs-connect link hskey-e-a1b2c3d4e5f6...
+  ```
+
+### Windows + WSL 协作模式
+
+在 Windows 11 (22H2 或更高版本) 上使用 WSL2 时，推荐启用 **`mirrored` 网络模式**。这允许 WSL 和 Windows 共享网络接口，从而实现更高级的协作。
+
+在这种模式下，正确的做法是：**在 Windows 上建立主隧道，然后在 WSL 中“借用”该隧道来激活节点。**
+
+**工作流程：**
+
+1.  **在 Windows PowerShell 中启动主隧道**:
+    ```powershell
+    # 切换到 win-powershell 目录
+    cd win-powershell
+    
+    # 运行 start 命令
+    .\hs-connect.ps1 start
+    ```
+    这会在 Windows 上建立唯一的 SSH 隧道，并激活 Windows 的 Tailscale 节点。
+
+2.  **在 WSL 终端中激活节点**:
+    ```bash
+    # 直接运行 activate 命令，它会自动借用 Windows 的隧道
+    hs-connect activate
+    ```
+    这**不会**创建新隧道，而是通过 Windows 的隧道来激活 WSL 的 Tailscale 节点。
+
+完成后，您的 Windows 和 WSL 将作为两个独立的设备出现在 Headscale 网络中，并且都能正常通信。
 
 ## 卸载
 
@@ -88,6 +150,10 @@ sudo ./uninstall.sh
     127.0.0.1 your.headscale.domain.com
     ```
     *(工具会自动检查该配置是否存在)*
+    **注意**: 如果您使用自定义端口（例如在 WSL 中），此步骤依然是必需的，因为 Tailscale 客户端需要通过域名来验证 TLS 证书。
+
+2.  **配置 `TUNNEL_PORT` (可选)**:
+    在首次运行时，配置向导会提示您输入 `TUNNEL_PORT`，默认为 `443`。如果您在标准 Linux 环境下运行，直接回车即可。如果您在 WSL2 的 `mirrored` 网络模式下运行，建议设置为一个大于 1024 的端口，例如 `10443`。
 
 2.  **配置 SSH 免密登录**：
     确保您可以从本地机器通过 SSH 密钥免密码登录到您的 Headscale 服务器。
