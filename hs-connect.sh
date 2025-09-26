@@ -100,7 +100,7 @@ fi
 # Check dependencies
 check_dependencies() {
     local missing_deps=0
-    for cmd in tailscale nc ssh ssh-add; do
+    for cmd in tailscale nc ssh ssh-add lsof; do
         if ! command -v "$cmd" &> /dev/null; then
             echo "❌ 错误：缺少核心依赖 '$cmd'。请先安装它。"
             missing_deps=1
@@ -151,28 +151,41 @@ get_auth_key() {
 start_tunnel() {
     echo ""
     echo "--- 第2步: 启动 SSH 隧道 ---"
-    if [ -f "$PID_FILE" ] && ps -p $(cat "$PID_FILE") > /dev/null; then
-        echo "   -> SSH 隧道已在运行 (PID: $(cat "$PID_FILE"))。"
-        return 0
+    
+    echo "   -> 正在后台启动 SSH 隧道..."
+    # 使用 -f 将 ssh 转入后台，-N 不执行远程命令，-o ExitOnForwardFailure=yes 如果端口无法监听则失败
+    # 将 stderr 重定向到 stdout 以便捕获错误
+    local output
+    output=$(ssh -L 443:localhost:443 -i "$SSH_KEY_PATH" -fN -o ExitOnForwardFailure=yes "$SSH_USER@$SERVER_IP" 2>&1)
+    
+    # ssh -f 会自行 fork 到后台，它的父进程会立即退出，所以 $! 在这里不可靠。
+    # 我们需要通过端口再次找到 PID。
+    local SSH_PID
+    SSH_PID=$(lsof -t -i TCP:443 -s TCP:LISTEN | xargs -r ps -o pid=,o comm= | awk '/ssh/{print $1}')
+
+    if [ -z "$SSH_PID" ]; then
+        echo "   -> 错误：无法启动 SSH 隧道。SSH 进程未找到。"
+        if [ -n "$output" ]; then
+            echo "   -> SSH 错误信息: $output"
+        fi
+        echo "   -> 请检查端口 443 是否被非 SSH 程序占用，或检查 SSH 连接配置。"
+        return 1
     fi
 
-    echo "   -> 正在后台启动 SSH 隧道..."
-    ssh -L 443:localhost:443 -i "$SSH_KEY_PATH" -fN -o ExitOnForwardFailure=yes "$SSH_USER@$SERVER_IP"
-    local SSH_PID=$!
     echo "$SSH_PID" > "$PID_FILE"
-    
-    echo "   -> 等待隧道端口(443)可用..."
-    for i in {1..10}; do
+    echo "   -> SSH 隧道已启动，进程 PID: $SSH_PID"
+
+    echo "   -> 正在验证隧道端口(443)是否可用..."
+    for i in {1..5}; do
         if nc -z 127.0.0.1 443 &>/dev/null; then
             echo "   -> 隧道端口已准备就绪。"
-            echo "   -> SSH 隧道成功启动 (PID: $SSH_PID)！"
             return 0
         fi
         sleep 1
     done
 
-    echo "   -> 错误：SSH 隧道在10秒内未能成功监听端口 443。"
-    echo "   -> 请检查 'ssh -L 443:localhost:443' 命令是否成功，或检查防火墙设置。"
+    echo "   -> 错误：SSH 隧道已启动 (PID: $SSH_PID)，但在5秒内无法连接到端口 443。"
+    echo "   -> 这可能是一个临时问题或配置错误。请检查防火墙或 SSH 服务器日志。"
     return 1
 }
 
@@ -198,8 +211,9 @@ activate_node() {
 # --- 主控制函数 ---
 
 start_and_activate() {
-    echo "--- 准备工作: 确保 tailscale 处于关闭状态 ---"
+    echo "--- 准备工作: 清理旧的连接和进程 ---"
     tailscale down >/dev/null 2>&1
+    stop_tunnel # 确保端口和进程是干净的
     
     if ! ssh-add -l >/dev/null 2>&1; then
         # 检查是否在 sudo 环境下，并且 SSH_AUTH_SOCK 丢失
@@ -234,18 +248,47 @@ start_and_activate() {
 # 关闭隧道
 stop_tunnel() {
     echo "--- 正在关闭 SSH 隧道 ---"
+    local tunnel_killed=false
+
+    # 1. 尝试通过 PID 文件关闭
     if [ -f "$PID_FILE" ]; then
-        local SSH_PID=$(cat "$PID_FILE")
-        if ps -p "$SSH_PID" > /dev/null; then
+        local SSH_PID
+        SSH_PID=$(cat "$PID_FILE")
+        if [ -n "$SSH_PID" ] && ps -p "$SSH_PID" > /dev/null; then
             kill "$SSH_PID"
-            echo "   -> 隧道进程 (PID: $SSH_PID) 已关闭。"
+            echo "   -> 隧道进程 (PID: $SSH_PID) 已通过 PID 文件关闭。"
+            tunnel_killed=true
         else
-            echo "   -> 找到 PID 文件，但未找到对应的隧道进程。"
+            echo "   -> PID 文件中的进程 ($SSH_PID) 无效或已不存在。"
         fi
+        # 立即删除 PID 文件，避免后续混淆
         rm -f "$PID_FILE"
     else
-        echo "   -> 未找到 PID 文件，可能隧道未通过此脚本启动。"
+        echo "   -> 未找到 PID 文件，将尝试通过端口查找。"
     fi
+
+    # 2. 强制检查并关闭任何占用 443 端口的 SSH 隧道进程
+    # 使用 lsof 查找监听 TCP 443 端口的进程，并过滤出 ssh 进程
+    local ZOMBIE_PID
+    ZOMBIE_PID=$(lsof -t -i TCP:443 -s TCP:LISTEN | xargs -r ps -o pid=,o comm= | awk '/ssh/{print $1}')
+    
+    if [ -n "$ZOMBIE_PID" ]; then
+        echo "   -> 发现残留的 SSH 隧道进程 (PID: $ZOMBIE_PID) 正在监听 443 端口，正在强制关闭..."
+        kill -9 "$ZOMBIE_PID"
+        # 等待一小段时间确保进程被终止
+        sleep 1
+        if ! ps -p "$ZOMBIE_PID" > /dev/null; then
+            echo "   -> 残留进程 (PID: $ZOMBIE_PID) 已被强制关闭。"
+            tunnel_killed=true
+        else
+            echo "   -> 警告：无法关闭残留的隧道进程 (PID: $ZOMBIE_PID)。请手动检查：sudo kill -9 $ZOMBIE_PID"
+        fi
+    elif [ "$tunnel_killed" = false ]; then
+        echo "   -> 未找到正在运行的隧道进程。"
+    fi
+    
+    # 确保 PID 文件最终被删除
+    rm -f "$PID_FILE"
     echo "✅ 清理完成！"
 }
 
