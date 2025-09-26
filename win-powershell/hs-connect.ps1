@@ -186,8 +186,7 @@ function Get-AuthKey {
     Write-Host "`n--- 第1步: 远程获取8小时临时预授权密钥 ---" -ForegroundColor Yellow
     $sshCommand = "sudo headscale preauthkeys create --user $($Global:Config.USER) --ephemeral --expiration 8h"
     $sshArgs = @(
-        "-i", "`"$($Global:Config.SSH_KEY_PATH)`"",
-        "-t",
+        "-i", $Global:Config.SSH_KEY_PATH,
         "$($Global:Config.SSH_USER)@$($Global:Config.SERVER_IP)",
         $sshCommand
     )
@@ -196,27 +195,31 @@ function Get-AuthKey {
         # 执行 ssh 并将错误流重定向到成功流，以便统一处理
         $output = ssh $sshArgs 2>&1
         
-        $lastLine = $output | Select-Object -Last 1
-
-        # 检查最后一行是否为 ErrorRecord，这表示 ssh 执行失败
-        if ($lastLine -is [System.Management.Automation.ErrorRecord]) {
-            Write-Error "   -> 错误：执行 SSH 命令失败。"
-            Write-Host "   -> SSH 错误详情: $($lastLine.ToString())"
-            return $null
+        # 优先在所有返回的行中搜索符合密钥格式的行
+        $key = $null
+        foreach ($line in $output) {
+            # 确保处理的是字符串，并清理
+            $trimmedLine = $line.ToString().Trim()
+            if ($trimmedLine -match '^[a-f0-9]{48}$') {
+                $key = $trimmedLine
+                break # 找到密钥就跳出循环
+            }
         }
 
-        # 如果执行到这里，说明结果是字符串或字符串数组。转换为字符串并清理。
-        $key = $lastLine.ToString().Trim()
-
-        if ($key -match '^[a-f0-9]{48}$') {
+        # 如果成功找到了密钥，就直接返回，忽略其他所有输出（包括无害的错误信息）
+        if ($key) {
             Write-Host "   -> 成功获取到8小时临时密钥: $($key.Substring(0, 12))..." -ForegroundColor Green
             return $key
-        } else {
-            Write-Error "   -> 错误：未能从服务器获取有效的预授权密钥。"
-            Write-Host "   -> 获取到的原始输出: '$key'"
-            Write-Host "   -> 请检查远程服务器上的 Headscale 服务是否正常，以及 SSH 免密登录是否配置正确。"
-            return $null
         }
+        
+        # 只有在完全找不到密钥的情况下，才认为执行失败，并打印所有原始输出以供调试
+        Write-Error "   -> 错误：执行 SSH 命令失败，且未能在返回内容中找到有效的预授权密钥。"
+        Write-Host "   -> SSH 返回的全部原始输出:"
+        foreach ($line in $output) {
+            Write-Host "     - $($line.ToString())"
+        }
+        Write-Host "   -> 请检查服务器返回的错误信息，并确认 Headscale 服务是否正常。"
+        return $null
     }
     catch {
         # 此块将捕获其他终止性错误。
@@ -232,7 +235,7 @@ function Start-SshTunnel {
     Write-Host "   -> 正在后台启动 SSH 隧道..."
     $sshArgs = @(
         "-L", "443:localhost:443",
-        "-i", "`"$($Global:Config.SSH_KEY_PATH)`"",
+        "-i", $Global:Config.SSH_KEY_PATH,
         "-N", # 不执行远程命令
         "-o", "ExitOnForwardFailure=yes",
         "-o", "PasswordAuthentication=no",
