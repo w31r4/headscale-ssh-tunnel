@@ -133,6 +133,7 @@ get_auth_key() {
     echo "--- 第1步: 远程获取8小时临时预授权密钥 ---"
     local key
     key=$(ssh -i "$SSH_KEY_PATH" -t "$SSH_USER@$SERVER_IP" \
+      -o PasswordAuthentication=no -o BatchMode=yes \
       "sudo headscale preauthkeys create --user $USER --ephemeral --expiration 8h" | tail -n 1)
     
     key=$(echo "$key" | tr -d '\r')
@@ -156,12 +157,20 @@ start_tunnel() {
     # 使用 -f 将 ssh 转入后台，-N 不执行远程命令，-o ExitOnForwardFailure=yes 如果端口无法监听则失败
     # 将 stderr 重定向到 stdout 以便捕获错误
     local output
-    output=$(ssh -L 443:localhost:443 -i "$SSH_KEY_PATH" -fN -o ExitOnForwardFailure=yes "$SSH_USER@$SERVER_IP" 2>&1)
+    output=$(ssh -L 443:localhost:443 -i "$SSH_KEY_PATH" -fN \
+      -o ExitOnForwardFailure=yes -o PasswordAuthentication=no -o BatchMode=yes \
+      "$SSH_USER@$SERVER_IP" 2>&1)
     
     # ssh -f 会自行 fork 到后台，它的父进程会立即退出，所以 $! 在这里不可靠。
     # 我们需要通过端口再次找到 PID。
     local SSH_PID
-    SSH_PID=$(lsof -t -i TCP:443 -s TCP:LISTEN | xargs -r ps -o pid=,o comm= | awk '/ssh/{print $1}')
+    # 使用更健壮的方式查找 PID，避免 ps 命令的兼容性问题
+    for pid in $(lsof -t -i TCP:443 -s TCP:LISTEN); do
+        if [ -f "/proc/$pid/comm" ] && grep -q "ssh" "/proc/$pid/comm"; then
+            SSH_PID=$pid
+            break
+        fi
+    done
 
     if [ -z "$SSH_PID" ]; then
         echo "   -> 错误：无法启动 SSH 隧道。SSH 进程未找到。"
@@ -215,19 +224,23 @@ start_and_activate() {
     tailscale down >/dev/null 2>&1
     stop_tunnel # 确保端口和进程是干净的
     
-    if ! ssh-add -l >/dev/null 2>&1; then
-        # 检查是否在 sudo 环境下，并且 SSH_AUTH_SOCK 丢失
-        if [[ -n "$SUDO_USER" ]] && [[ -z "$SSH_AUTH_SOCK" ]]; then
-            echo "❌ 错误：在 sudo 环境下无法连接到 SSH Agent。"
-            echo "   -> 这是因为 sudo 默认会重置环境变量。"
-            echo "   -> 请尝试使用 'sudo -E' 来运行此脚本，以保留您的用户环境:"
-            echo "      sudo -E ./hs-connect.sh $1"
-        else
-            echo "❌ 错误：SSH Agent 中没有已加载的密钥，或无法连接。"
-            echo "   -> 请确保您的 SSH 密钥已通过 'ssh-add' 加载。"
-            echo "   -> 如果您正在使用 sudo，请尝试 'sudo -E'。"
+    # 检查 SSH Agent 中是否有密钥。
+    # 在 sudo 环境下，必须以原始用户身份执行此检查。
+    if [[ -n "$SUDO_USER" ]]; then
+        # 在 sudo 环境中
+        if ! sudo -u "$SUDO_USER" SSH_AUTH_SOCK="$SSH_AUTH_SOCK" ssh-add -l >/dev/null 2>&1; then
+            echo "❌ 错误：在 sudo 环境下，用户 '$SUDO_USER' 的 SSH Agent 中没有已加载的密钥。"
+            echo "   -> 请在运行此脚本前，确保您已在普通用户 shell 中执行 'ssh-add' 加载了正确的密钥。"
+            echo "   -> 例如: ssh-add ~/.ssh/id_rsa"
+            exit 1
         fi
-        exit 1
+    else
+        # 在非 sudo 环境中 (理论上不应发生，因为脚本会自动提权)
+        if ! ssh-add -l >/dev/null 2>&1; then
+            echo "❌ 错误：SSH Agent 中没有已加载的密钥。"
+            echo "   -> 请执行 'ssh-add' 加载密钥后重试。"
+            exit 1
+        fi
     fi
 
     if ! get_auth_key; then
@@ -270,7 +283,13 @@ stop_tunnel() {
     # 2. 强制检查并关闭任何占用 443 端口的 SSH 隧道进程
     # 使用 lsof 查找监听 TCP 443 端口的进程，并过滤出 ssh 进程
     local ZOMBIE_PID
-    ZOMBIE_PID=$(lsof -t -i TCP:443 -s TCP:LISTEN | xargs -r ps -o pid=,o comm= | awk '/ssh/{print $1}')
+    # 使用更健壮的方式查找僵尸进程，避免 ps 命令的兼容性问题
+    for pid in $(lsof -t -i TCP:443 -s TCP:LISTEN); do
+        if [ -f "/proc/$pid/comm" ] && grep -q "ssh" "/proc/$pid/comm"; then
+            ZOMBIE_PID=$pid
+            break
+        fi
+    done
     
     if [ -n "$ZOMBIE_PID" ]; then
         echo "   -> 发现残留的 SSH 隧道进程 (PID: $ZOMBIE_PID) 正在监听 443 端口，正在强制关闭..."
