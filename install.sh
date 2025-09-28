@@ -7,9 +7,9 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # 定义源文件和目标路径
-SOURCE_FILE="hs-connect.sh"
+SOURCE_FILE="msh.sh"
 INSTALL_DIR="/usr/local/bin"
-INSTALL_PATH="$INSTALL_DIR/hs-connect"
+INSTALL_PATH="$INSTALL_DIR/msh"
 
 # 检查源文件是否存在
 if [ ! -f "$SOURCE_FILE" ]; then
@@ -18,15 +18,15 @@ if [ ! -f "$SOURCE_FILE" ]; then
 fi
 
 # 复制文件并设置权限
-echo "正在安装 hs-connect..."
+echo "正在安装 msh (Matryoshka-SHell)..."
 cp "$SOURCE_FILE" "$INSTALL_PATH"
 chmod +x "$INSTALL_PATH"
 
 # 检查是否成功安装
 if [ -f "$INSTALL_PATH" ] && [ -x "$INSTALL_PATH" ]; then
-  echo "hs-connect 已成功安装到 $INSTALL_PATH"
-  echo "现在你可以在系统的任何地方使用 'hs-connect' 命令。"
-  echo "例如，运行 'hs-connect status' 来检查状态。"
+  echo "msh 已成功安装到 $INSTALL_PATH"
+  echo "现在你可以在系统的任何地方使用 'msh' 命令。"
+  echo "例如，运行 'msh status' 来检查状态。"
 else
   echo "安装失败。请检查权限和路径是否正确。" >&2
   exit 1

@@ -7,23 +7,23 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # 定义安装路径和配置文件路径
-INSTALL_PATH="/usr/local/bin/hs-connect"
+INSTALL_PATH="/usr/local/bin/msh"
 # 如果使用 sudo, $HOME 可能是 /root, 所以我们尝试获取原始用户的家目录
 if [ -n "$SUDO_USER" ]; then
     USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
     USER_HOME=$HOME
 fi
-USER_CONFIG_DIR="$USER_HOME/.config/hs-connect"
-SYSTEM_CONFIG_DIR="/etc/hs-connect"
+USER_CONFIG_DIR="$USER_HOME/.config/msh"
+SYSTEM_CONFIG_DIR="/etc/msh"
 
 # 移除主程序
 if [ -f "$INSTALL_PATH" ]; then
-  echo "正在移除 hs-connect 主程序..."
+  echo "正在移除 msh 主程序..."
   rm -f "$INSTALL_PATH"
-  echo "hs-connect 已从 $INSTALL_PATH 移除。"
+  echo "msh 已从 $INSTALL_PATH 移除。"
 else
-  echo "hs-connect 主程序未找到，可能已被卸载。"
+  echo "msh 主程序未找到，可能已被卸载。"
 fi
 
 # 询问是否删除配置文件
@@ -54,6 +54,6 @@ else
   echo "保留配置文件。"
 fi
 
-echo "hs-connect 卸载完成。"
+echo "msh 卸载完成。"
 
 exit 0

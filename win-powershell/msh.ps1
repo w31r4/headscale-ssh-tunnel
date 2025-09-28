@@ -57,9 +57,9 @@ if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administ
 # --- 配置和设置 ---
 
 # 定义配置路径
-$ConfigDir = Join-Path $env:LOCALAPPDATA "hs-connect"
+$ConfigDir = Join-Path $env:LOCALAPPDATA "msh"
 $ConfigFile = Join-Path $ConfigDir "config.json"
-$PidFile = Join-Path $ConfigDir "hs-connect.pid"
+$PidFile = Join-Path $ConfigDir "msh.pid"
 
 # 全局配置变量
 $Global:Config = $null
@@ -541,12 +541,12 @@ function Is-Tunnel-Running {
 
 function Show-Help {
     Write-Host @"
-hs-connect: Headscale SSH 隧道连接工具 (PowerShell版 v3.2)
+msh (Matryoshka-SHell): Headscale SSH 隧道连接工具 (PowerShell版 v4.0)
 
-一个用于通过 SSH 隧道安全连接到 Headscale 的命令行工具。
+一个通过 SSH 隧道安全连接到 Headscale 的命令行工具。
 
 用法:
-  .\hs-connect.ps1 <Command> [Options]
+  .\msh.ps1 <Command> [Options]
 
 可用命令:
   start               启动 SSH 隧道并激活 Headscale 节点

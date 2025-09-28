@@ -26,10 +26,10 @@ fi
 # Define config paths. When under sudo, HOME is /root, so we need the real user's home.
 # SUDO_USER is set by sudo. If not set, we are not in sudo, but the root check above handles that.
 REAL_HOME=$(getent passwd "${SUDO_USER:-$(whoami)}" | cut -d: -f6)
-USER_CONFIG_DIR="$REAL_HOME/.config/hs-connect"
+USER_CONFIG_DIR="$REAL_HOME/.config/msh"
 USER_CONFIG_FILE="$USER_CONFIG_DIR/config.sh"
-SYSTEM_CONFIG_FILE="/etc/hs-connect/config.sh"
-PID_FILE="/var/run/hs-connect.pid"
+SYSTEM_CONFIG_FILE="/etc/msh/config.sh"
+PID_FILE="/var/run/msh.pid"
 
 # Interactive first-run setup function
 setup_config() {
@@ -60,7 +60,7 @@ setup_config() {
     temp_config=$(mktemp)
     cat > "$temp_config" << EOL
 #!/bin/bash
-# Headscale 连接配置
+# msh (Matryoshka-SHell) 连接配置
 
 # Headscale 服务器的 IP 地址
 SERVER_IP="$SERVER_IP"
@@ -483,12 +483,12 @@ is_tunnel_running() {
 
 # 显示帮助信息
 show_help() {
-    echo "hs-connect: Headscale SSH 隧道连接工具 (v3.2)"
+    echo "msh (Matryoshka-SHell): Headscale SSH 隧道连接工具 (v4.0)"
     echo ""
-    echo "一个用于通过 SSH 隧道安全连接到 Headscale 的命令行工具。"
+    echo "一个通过 SSH 隧道安全连接到 Headscale 的命令行工具。"
     echo ""
     echo "用法:"
-    echo "  hs-connect <command> [options]"
+    echo "  msh <command> [options]"
     echo ""
     echo "可用命令:"
     echo "  start               启动 SSH 隧道并激活 Headscale 节点"

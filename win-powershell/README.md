@@ -1,8 +1,8 @@
-# Headscale SSH 隧道连接工具 (PowerShell 版 v3.2)
+# msh (Matryoshka-SHell) - PowerShell 版 (v4.0)
 
-本项目提供一个名为 `hs-connect.ps1` 的 PowerShell 脚本，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
+本项目提供一个名为 `msh.ps1` 的 PowerShell 脚本，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
 
-这是原始 `headscale-ssh-tunnel` 项目的 Windows/PowerShell 实现。
+这是 `msh` 项目的 Windows/PowerShell 实现。
 
 ## 核心原理
 
@@ -66,7 +66,7 @@
 当您第一次运行 `start` 或 `status` 命令时，工具会启动一个交互式的设置向导，引导您完成配置。
 
 配置文件将被保存在以下位置：
-`C:\Users\<你的用户名>\AppData\Local\hs-connect\config.json`
+`C:\Users\<你的用户名>\AppData\Local\msh\config.json`
 
 配置文件内容示例：
 ```json
@@ -84,7 +84,7 @@
 
 #### 启动隧道并激活节点
 ```powershell
-.\hs-connect.ps1 start [Options]
+.\msh.ps1 start [Options]
 ```
 - **描述**: 这是最常用的命令。它会清理旧进程、获取预授权密钥、建立 SSH 隧道，并激活本地 Tailscale 节点。
 - **选项**:
@@ -94,27 +94,27 @@
 **示例：**
 ```powershell
 # 使用默认配置启动
-.\hs-connect.ps1 start
+.\msh.ps1 start
 
 # 使用 10443 端口，并设置密钥有效期为30天
-.\hs-connect.ps1 start -Port 10443 -Expiration 30d
+.\msh.ps1 start -Port 10443 -Expiration 30d
 ```
 
 #### 关闭隧道
 ```powershell
-.\hs-connect.ps1 stop
+.\msh.ps1 stop
 ```
 - **描述**: 关闭由脚本启动的 SSH 隧道并清理所有相关进程。
 
 #### 检查连接状态
 ```powershell
-.\hs-connect.ps1 status
+.\msh.ps1 status
 ```
 - **描述**: 检查 SSH 隧道和 Tailscale 节点的当前状态。
 
 #### 仅激活节点
 ```powershell
-.\hs-connect.ps1 activate [Options]
+.\msh.ps1 activate [Options]
 ```
 - **描述**: 此命令仅获取预授权密钥并激活节点，它**不会**创建新的 SSH 隧道。适用于多个客户端（例如 Windows 和 WSL）共享同一个隧道的情况。
 - **选项**:
@@ -122,19 +122,19 @@
 
 #### 使用已有密钥激活
 ```powershell
-.\hs-connect.ps1 link -Key <预授权密钥> [-Port <端口号>]
+.\msh.ps1 link -Key <预授权密钥> [-Port <端口号>]
 ```
 - **描述**: 直接使用一个已经存在的预授权密钥来激活节点。此命令非常智能：它会先检查 SSH 隧道是否存在，如果不存在，则会自动为您启动一个。
 - **选项**:
   - `-Port <端口号>`: 在自动启动隧道时，可以临时指定一个端口。
 - **示例**:
   ```powershell
-  .\hs-connect.ps1 link -Key hskey-e-a1b2c3d4e5f6...
+  .\msh.ps1 link -Key hskey-e-a1b2c3d4e5f6...
   ```
 
 #### 显示帮助
 ```powershell
-.\hs-connect.ps1 help
+.\msh.ps1 help
 ```
 
 ## Windows + WSL 协作模式
@@ -148,17 +148,17 @@
 1.  **在 Windows PowerShell 中启动主隧道 (当前脚本)**:
   ```powershell
   # 运行 start 命令
-  .\hs-connect.ps1 start
+  .\msh.ps1 start
   ```
   这会在 Windows 上建立唯一的 SSH 隧道，并激活 Windows 的 Tailscale 节点。
 
 2.  **在 WSL 终端中激活节点**:
   - 打开您的 WSL 终端。
-  - 确保您已经在 WSL 中安装了 `hs-connect` 的 Bash 版本。
+  - 确保您已经在 WSL 中安装了 `msh` 的 Bash 版本。
   - 运行 `activate` 命令：
   ```bash
   # 这会借用 Windows 的隧道来激活 WSL 的节点
-  hs-connect activate
+  msh activate
   ```
 
 完成后，您的 Windows 和 WSL 将作为两个独立的设备出现在 Headscale 网络中，并且都能正常通信。

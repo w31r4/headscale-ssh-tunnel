@@ -1,6 +1,6 @@
-# Headscale SSH 隧道连接工具 (v3.2)
+# msh (Matryoshka-SHell) - Headscale SSH 隧道连接工具 (v4.0)
 
-本项目提供一个名为 `hs-connect` 的命令行工具，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
+本项目提供一个名为 `msh` 的命令行工具，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
 
 与普通脚本不同，本项目注重**易用性**、**健壮性**和**安全性**，内置了完整的交互式配置向导、环境检查和进程管理机制。
 
@@ -34,8 +34,8 @@
 1.  **克隆或下载项目**
     首先，获取项目文件。
     ```bash
-    git clone https://github.com/w31r4/headscale-ssh-tunnel.git
-    cd headscale-ssh-tunnel
+    git clone https://github.com/your-repo/msh.git
+    cd msh
     ```
 
 2.  **为脚本添加可执行权限**
@@ -45,20 +45,20 @@
     ```
 
 3.  **运行安装脚本**
-    使用 `sudo` 权限运行安装脚本。该脚本会将 `hs-connect` 命令安装到 `/usr/local/bin`，并设置必要的权限。
+    使用 `sudo` 权限运行安装脚本。该脚本会将 `msh` 命令安装到 `/usr/local/bin`，并设置必要的权限。
     ```bash
     sudo ./install.sh
     ```
 
 ## 用法
 
-安装完成后，您可以在任何地方直接使用 `hs-connect` 命令。如果这是您第一次运行，工具会启动一个交互式的设置向导。
+安装完成后，您可以在任何地方直接使用 `msh` 命令。如果这是您第一次运行，工具会启动一个交互式的设置向导。
 
 ### 可用命令
 
 #### 启动隧道并激活节点
 ```bash
-hs-connect start [options]
+msh start [options]
 ```
 - **描述**: 这是最常用的命令。它会清理旧进程、获取预授权密钥、建立 SSH 隧道，并激活本地 Tailscale 节点。
 - **选项**:
@@ -68,27 +68,27 @@ hs-connect start [options]
 **示例：**
 ```bash
 # 使用默认配置启动
-hs-connect start
+msh start
 
 # 在 WSL 中使用，将隧道建立在 10443 端口，并设置密钥有效期为30天
-hs-connect start --port 10443 --expiration 30d
+msh start --port 10443 --expiration 30d
 ```
 
 #### 关闭隧道
 ```bash
-hs-connect stop
+msh stop
 ```
-- **描述**: 关闭由 `hs-connect` 启动的 SSH 隧道并清理所有相关进程。
+- **描述**: 关闭由 `msh` 启动的 SSH 隧道并清理所有相关进程。
 
 #### 检查连接状态
 ```bash
-hs-connect status
+msh status
 ```
 - **描述**: 检查 SSH 隧道和 Tailscale 节点的当前状态。
 
 #### 仅激活节点
 ```bash
-hs-connect activate [options]
+msh activate [options]
 ```
 - **描述**: 此命令仅获取预授权密钥并激活节点，它**不会**创建新的 SSH 隧道。适用于多个客户端（例如 Windows 和 WSL）共享同一个隧道的情况。
 - **选项**:
@@ -96,14 +96,14 @@ hs-connect activate [options]
 
 #### 使用已有密钥激活
 ```bash
-hs-connect link <预授权密钥> [--port <端口号>]
+msh link <预授权密钥> [--port <端口号>]
 ```
 - **描述**: 直接使用一个已经存在的预授权密钥来激活节点。此命令非常智能：它会先检查 SSH 隧道是否存在，如果不存在，则会自动为您启动一个。
 - **选项**:
   - `--port <端口号>`: 在自动启动隧道时，可以临时指定一个端口。
 - **示例**:
   ```bash
-  hs-connect link hskey-e-a1b2c3d4e5f6...
+  msh link hskey-e-a1b2c3d4e5f6...
   ```
 
 ### Windows + WSL 协作模式
@@ -120,14 +120,14 @@ hs-connect link <预授权密钥> [--port <端口号>]
     cd win-powershell
     
     # 运行 start 命令
-    .\hs-connect.ps1 start
+    .\msh.ps1 start
     ```
     这会在 Windows 上建立唯一的 SSH 隧道，并激活 Windows 的 Tailscale 节点。
 
 2.  **在 WSL 终端中激活节点**:
     ```bash
     # 直接运行 activate 命令，它会自动借用 Windows 的隧道
-    hs-connect activate
+    msh activate
     ```
     这**不会**创建新隧道，而是通过 Windows 的隧道来激活 WSL 的 Tailscale 节点。
 
