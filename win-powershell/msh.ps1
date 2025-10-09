@@ -325,15 +325,23 @@ function Start-SshTunnel {
     }
 }
 
-function Invoke-NodeActivation($authKey) {
+function Invoke-NodeActivation($authKey, $tunnelPort) {
     Write-Host "`n--- 第3步: 登录并激活 Headscale 节点 ---" -ForegroundColor Yellow
+
+    # 根据隧道端口动态构建登录服务器地址
+    $loginServer = "https://$($Global:Config.HEADSCALE_DOMAIN)"
+    if ($tunnelPort -ne 443) {
+        $loginServer += ":$tunnelPort"
+    }
+
     $tsArgs = @(
         "up",
-        "--login-server=https://$($Global:Config.HEADSCALE_DOMAIN)",
+        "--login-server=$loginServer",
         "--authkey=$authKey",
         "--accept-routes"
     )
     
+    Write-Host "   -> 正在使用登录服务器: $loginServer"
     tailscale $tsArgs
 
     # 检查结果
@@ -370,7 +378,11 @@ function Start-AndActivate {
         exit 1
     }
 
-    if (-not (Invoke-NodeActivation -authKey $authKey)) {
+    # 确定隧道端口以传递给激活函数
+    $tunnelPort = if ($Port -ne 0) { $Port } else { $Global:Config.TUNNEL_PORT }
+    if (-not $tunnelPort -or $tunnelPort -eq 0) { $tunnelPort = 443 }
+
+    if (-not (Invoke-NodeActivation -authKey $authKey -tunnelPort $tunnelPort)) {
         Stop-SshTunnel
         exit 1
     }
@@ -406,18 +418,25 @@ function Link-Node {
     }
 
     # 检查隧道状态，如果不存在则启动
-    if (-not (Is-Tunnel-Running)) {
+    $runningPort = Is-Tunnel-Running
+    if ($runningPort -eq 0) {
         Write-Host "   -> 未检测到活动的 SSH 隧道，正在尝试启动一个..."
         if (-not (Start-SshTunnel -Port $Port)) {
             Stop-SshTunnel
             exit 1
         }
+        # 获取新启动的隧道端口
+        $runningPort = Is-Tunnel-Running
+        if ($runningPort -eq 0) {
+            Write-Error "   -> 错误：隧道启动后仍然无法检测到运行端口。"
+            exit 1
+        }
     }
     else {
-        Write-Host "   -> 检测到已存在的 SSH 隧道，将直接使用。"
+        Write-Host "   -> 检测到已存在的 SSH 隧道 (端口: $runningPort)，将直接使用。"
     }
 
-    if (-not (Invoke-NodeActivation -authKey $AuthKey)) {
+    if (-not (Invoke-NodeActivation -authKey $AuthKey -tunnelPort $runningPort)) {
         exit 1
     }
 }
@@ -483,7 +502,8 @@ function Get-ConnectionStatus {
     Write-Host "--- 检查连接状态 ---" -ForegroundColor Yellow
     
     # 1. 检查 SSH 隧道
-    if (-not (Is-Tunnel-Running -Verbose)) {
+    $runningPort = Is-Tunnel-Running -Verbose
+    if ($runningPort -eq 0) {
         Write-Host "❌ SSH 隧道: 未运行" -ForegroundColor Red
     }
 
