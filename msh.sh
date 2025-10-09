@@ -216,9 +216,17 @@ start_tunnel() {
 }
 
 activate_node() {
+    local tunnel_port=$1
     echo ""
     echo "--- 第3步: 登录并激活 Headscale 节点 ---"
-    tailscale up --login-server="https://$HEADSCALE_DOMAIN" --authkey="$AUTH_KEY" --accept-routes
+
+    local login_server="https://$HEADSCALE_DOMAIN"
+    if [[ -n "$tunnel_port" && "$tunnel_port" -ne 443 ]]; then
+        login_server="https://$HEADSCALE_DOMAIN:$tunnel_port"
+    fi
+    
+    echo "   -> 正在使用登录服务器: $login_server"
+    tailscale up --login-server="$login_server" --authkey="$AUTH_KEY" --accept-routes
 
     if tailscale ip -4 &>/dev/null; then
          local TS_IP=$(tailscale ip -4)
@@ -273,7 +281,7 @@ start_and_activate() {
         exit 1
     fi
 
-    if ! activate_node; then
+    if ! activate_node "$tunnel_port"; then
         stop_tunnel
         exit 1
     fi
@@ -337,18 +345,25 @@ link_node() {
     fi
 
     # 检查隧道状态，如果不存在则启动
-    if ! is_tunnel_running; then
+    local running_port
+    running_port=$(is_tunnel_running)
+    if [[ "$running_port" -eq 0 ]]; then
         echo "   -> 未检测到活动的 SSH 隧道，正在尝试启动一个..."
         if ! start_tunnel "$tunnel_port"; then
             stop_tunnel
             exit 1
         fi
+        running_port=$(is_tunnel_running)
+        if [[ "$running_port" -eq 0 ]]; then
+            echo "   -> 错误：隧道启动后仍然无法检测到运行端口。"
+            exit 1
+        fi
     else
-        echo "   -> 检测到已存在的 SSH 隧道，将直接使用。"
+        echo "   -> 检测到已存在的 SSH 隧道 (端口: $running_port)，将直接使用。"
     fi
 
     AUTH_KEY=$key
-    activate_node
+    activate_node "$running_port"
 }
 
 check_ssh_agent() {
@@ -432,7 +447,9 @@ check_status() {
     echo "--- 检查连接状态 ---"
     
     # 1. 检查 SSH 隧道
-    if ! is_tunnel_running "verbose"; then
+    local running_port
+    running_port=$(is_tunnel_running "verbose")
+    if [[ "$running_port" -eq 0 ]]; then
         echo "❌ SSH 隧道: 未运行"
     fi
 
@@ -451,18 +468,22 @@ check_status() {
 
 is_tunnel_running() {
     local verbose=$1
+    local port=0
+
     # 1. 尝试通过 PID 文件检查
     if [ -f "$PID_FILE" ]; then
         local pid_info
         pid_info=$(cat "$PID_FILE")
         local SSH_PID=${pid_info%:*}
-        local port=${pid_info#*:}
+        local file_port=${pid_info#*:}
         
         if [ -n "$SSH_PID" ] && ps -p "$SSH_PID" > /dev/null; then
+            port=$file_port
             if [[ "$verbose" == "verbose" ]]; then
                 echo "✅ SSH 隧道: 正在运行 (PID: $SSH_PID, 端口: $port) [通过PID文件检测]"
             fi
-            return 0 # 0 表示 true (成功)
+            echo "$port"
+            return
         fi
     fi
 
@@ -470,15 +491,15 @@ is_tunnel_running() {
     local listening_ssh_pid
     listening_ssh_pid=$(lsof -i -P -n | grep LISTEN | grep ssh | awk '{print $2}' | head -n 1)
     if [ -n "$listening_ssh_pid" ]; then
+        local detected_port
+        detected_port=$(lsof -i -P -n -p "$listening_ssh_pid" | grep LISTEN | awk '{print $9}' | cut -d: -f2)
+        port=$detected_port
         if [[ "$verbose" == "verbose" ]]; then
-            local port
-            port=$(lsof -i -P -n -p "$listening_ssh_pid" | grep LISTEN | awk '{print $9}' | cut -d: -f2)
             echo "✅ SSH 隧道: 正在运行 (PID: $listening_ssh_pid, 端口: $port) [通过端口检测]"
         fi
-        return 0
     fi
 
-    return 1 # 1 表示 false (失败)
+    echo "$port"
 }
 
 # 显示帮助信息
