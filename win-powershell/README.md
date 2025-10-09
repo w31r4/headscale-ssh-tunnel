@@ -129,8 +129,31 @@
   - `-Port <端口号>`: 在自动启动隧道时，可以临时指定一个端口。
 - **示例**:
   ```powershell
-  .\msh.ps1 link -Key hskey-e-a1b2c3d4e5f6...
+  .\msh.ps1 link hskey-e-a1b2c3d4e5f6...
   ```
+
+#### 管理配置
+```powershell
+.\msh.ps1 config <sub-command> [arguments]
+```
+- **描述**: 提供了一组用于查看和修改本地 `config.json` 文件的便捷命令。
+- **子命令**:
+ - `get [KEY]`: 查看全部或单个配置项的值。
+   ```powershell
+   # 查看所有配置 (以 JSON 格式)
+   .\msh.ps1 config get
+   # 只看 SSH_USER 的值
+   .\msh.ps1 config get SSH_USER
+   ```
+ - `set <KEY> <VALUE>`: 修改一个配置项的值。
+   ```powershell
+   # 将 SSH 用户改为 'ubuntu'
+   .\msh.ps1 config set SSH_USER ubuntu
+   ```
+ - `edit`: 使用系统默认的应用程序打开 `config.json` 文件进行手动编辑。
+   ```powershell
+   .\msh.ps1 config edit
+   ```
 
 #### 显示帮助
 ```powershell
