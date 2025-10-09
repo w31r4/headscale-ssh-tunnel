@@ -106,6 +106,29 @@ msh link <预授权密钥> [--port <端口号>]
   msh link hskey-e-a1b2c3d4e5f6...
   ```
 
+#### 管理配置
+```bash
+msh config <sub-command> [options]
+```
+- **描述**: 提供了一组用于查看和修改本地配置文件的便捷命令，避免了手动编辑的麻烦。
+- **子命令**:
+ - `get [KEY]`: 查看全部或单个配置项的值。
+   ```bash
+   # 查看所有配置
+   msh config get
+   # 只看 SSH_USER 的值
+   msh config get SSH_USER
+   ```
+ - `set <KEY> <VALUE>`: 修改一个配置项的值。
+   ```bash
+   # 将 SSH 用户改为 'ubuntu'
+   msh config set SSH_USER ubuntu
+   ```
+ - `edit`: 使用默认的命令行编辑器 (`$EDITOR`, `vim`, `nano`) 打开配置文件进行手动编辑。
+   ```bash
+   msh config edit
+   ```
+
 ### Windows + WSL 协作模式
 
 在 Windows 11 (22H2 或更高版本) 上使用 WSL2 时，推荐启用 **`mirrored` 网络模式**。这允许 WSL 和 Windows 共享网络接口，从而实现更高级的协作。

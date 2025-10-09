@@ -26,21 +26,33 @@
     作者: w31rd
     版本: 1.0.0
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Default')]
 param (
-    [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Commands')]
-    [ValidateSet('start', 'stop', 'status', 'help', 'activate', 'link')]
+    # --- Parameter Set for standard commands like 'start', 'stop', etc. ---
+    [Parameter(Mandatory = $true, Position = 0, ParameterSetName = 'Default')]
+    [ValidateSet('start', 'stop', 'status', 'help', 'activate', 'link', 'config')]
     [string]$Command,
 
-    [Parameter(Mandatory = $true, ParameterSetName = 'LinkCommand')]
-    [string]$Key,
-
-    [Parameter(Mandatory = $false, ParameterSetName = 'Commands')]
-    [Parameter(Mandatory = $false, ParameterSetName = 'LinkCommand')]
+    # --- Parameters for 'start' and 'link' ---
+    [Parameter(ParameterSetName = 'Default')]
     [string]$Expiration = '8h',
 
-    [Parameter(Mandatory = $false, ParameterSetName = 'Commands')]
-    [int]$Port = 0
+    [Parameter(ParameterSetName = 'Default')]
+    [int]$Port = 0,
+    
+    [Parameter(ParameterSetName = 'Default')]
+    [string]$Key,
+
+    # --- Parameters for 'config' command ---
+    [Parameter(Position = 1, ParameterSetName = 'Default')]
+    [ValidateSet('get', 'set', 'edit')]
+    [string]$ConfigSubCommand,
+    
+    [Parameter(Position = 2, ParameterSetName = 'Default')]
+    [string]$ConfigKey,
+    
+    [Parameter(Position = 3, ParameterSetName = 'Default')]
+    [string]$ConfigValue
 )
 
 # --- 自动提权 ---
@@ -48,8 +60,66 @@ param (
 $currentUser = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warning "脚本需要管理员权限，正在尝试自动提权..."
-    # 构建重新启动脚本所需的所有参数
-    $arguments = "& '$($MyInvocation.MyCommand.Path)' $Command"
+    # 尝试获取原始命令行参数
+    try {
+        # 使用 .NET 反射获取 Environment.CommandLine
+        Add-Type -TypeDefinition @"
+        using System;
+        using System.Runtime.InteropServices;
+        public class CommandLineHelper {
+            [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+            public static extern IntPtr GetCommandLine();
+        }
+"@
+        $rawCommandLine = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([CommandLineHelper]::GetCommandLine())
+        # 移除 powershell.exe 的调用部分，保留脚本路径和参数
+        # 这是一个简化的处理，可能需要根据实际情况调整
+        $scriptPath = $MyInvocation.MyCommand.Path
+        $scriptPathEscaped = [Regex]::Escape($scriptPath)
+        if ($rawCommandLine -match "(&\s*)?['`"]?$scriptPathEscaped['`"]?(.*)") {
+            $arguments = "& '$scriptPath' " + $matches[2].Trim()
+        } else {
+            # 如果正则匹配失败，回退到基于参数集的重建（之前的逻辑）
+            throw "无法解析原始命令行，回退到参数重建"
+        }
+    } catch {
+        # 回退方案：基于参数集和 $PSBoundParameters 重建命令行
+        Write-Warning "无法获取原始命令行，使用参数重建方法: $_"
+        $allArgs = @()
+        switch ($PSCmdlet.ParameterSetName) {
+            'Default' {
+                $allArgs += $Command
+                # Handle config sub-commands
+                if ($Command -eq 'config' -and $PSBoundParameters.ContainsKey('ConfigSubCommand')) {
+                    $allArgs += $ConfigSubCommand
+                    if ($PSBoundParameters.ContainsKey('ConfigKey') -and -not [string]::IsNullOrWhiteSpace($ConfigKey)) {
+                        $allArgs += $ConfigKey
+                        if ($PSBoundParameters.ContainsKey('ConfigValue') -and -not [string]::IsNullOrWhiteSpace($ConfigValue)) {
+                            $allArgs += "`"$ConfigValue`""
+                        }
+                    }
+                }
+                # Handle other command parameters
+                elseif ($Command -ne 'config') {
+                    if ($PSBoundParameters.ContainsKey('Expiration') -and $Expiration -ne '8h') {
+                        $allArgs += "-Expiration"
+                        $allArgs += "`"$Expiration`""
+                    }
+                    if ($PSBoundParameters.ContainsKey('Port') -and $Port -ne 0) {
+                        $allArgs += "-Port"
+                        $allArgs += $Port
+                    }
+                    if ($PSBoundParameters.ContainsKey('Key') -and -not [string]::IsNullOrWhiteSpace($Key)) {
+                        $allArgs += "-Key"
+                        $allArgs += "`"$Key`""
+                    }
+                }
+            }
+        }
+        $arguments = "& '$($MyInvocation.MyCommand.Path)' " + ($allArgs -join ' ')
+    }
+    
+    # Write-Host "DEBUG: Restarting with arguments: $arguments" # 调试时启用
     Start-Process powershell -Verb RunAs -ArgumentList $arguments
     exit
 }
@@ -168,41 +238,37 @@ function main {
         break
     }
 
-    # 对于非 'help' 命令，加载配置并执行检查
+    # 根据参数集确定要执行的操作 (现在所有参数都在 Default 参数集中)
     if ($Command -ne 'help') {
-        Load-Config
-        Test-Dependencies
-        Test-HostsFile
+        # 对于 'help' 和 'config' 之外的命令，加载配置并执行检查
+        if ($Command -ne 'config') {
+            Load-Config
+            Test-Dependencies
+            Test-HostsFile
+        }
+        # 特殊处理 'config' 命令：如果用户只输入了 'config' 而没有子命令，显示帮助
+        elseif ($Command -eq 'config' -and -not $ConfigSubCommand) {
+            Show-Help
+            return
+        }
     }
 
-    # 确定实际执行的命令
-    $effectiveCommand = $Command
-    if ($PSCmdlet.ParameterSetName -eq 'LinkCommand') {
-        $effectiveCommand = 'link'
-    }
-
-    switch ($effectiveCommand) {
-        'start' {
-            Start-AndActivate -Port $Port -Expiration $Expiration
+    switch ($Command) {
+        'start' { Start-AndActivate -Port $Port -Expiration $Expiration }
+        'activate' { Activate-Only -Expiration $Expiration }
+        'link' { Link-Node -AuthKey $Key }
+        'stop' { Stop-SshTunnel }
+        'status' { Get-ConnectionStatus }
+        'help' { Show-Help }
+        'config' {
+            switch ($ConfigSubCommand) {
+                'get' { Handle-ConfigCommand -SubCommand 'get' -Key $ConfigKey }
+                'set' { Handle-ConfigCommand -SubCommand 'set' -Key $ConfigKey -Value $ConfigValue }
+                'edit' { Handle-ConfigCommand -SubCommand 'edit' }
+                default { Show-Help }
+            }
         }
-        'activate' {
-            Activate-Only -Expiration $Expiration
-        }
-        'link' {
-            Link-Node -AuthKey $Key
-        }
-        'stop' {
-            Stop-SshTunnel
-        }
-        'status' {
-            Get-ConnectionStatus
-        }
-        'help' {
-            Show-Help
-        }
-        default {
-            Show-Help
-        }
+        default { Show-Help }
     }
 }
 
@@ -579,18 +645,71 @@ msh (Matryoshka-SHell): Headscale SSH 隧道连接工具 (PowerShell版 v4.0)
   activate            仅获取密钥并激活节点 (用于共享已存在的隧道)
     -Expiration <时长>  临时指定预授权密钥的有效期
 
-  link -Key <密钥>    使用已有的密钥激活节点 (如果隧道不存在会自动启动)
+  link <Key>          使用已有的密钥激活节点 (如果隧道不存在会自动启动)
     -Port <端口>      在自动启动隧道时指定端口
+
+ config get [KEY]    显示全部或指定的配置项
+ config set <KEY> <VALUE>
+                     修改一个配置项的值
+ config edit         使用默认编辑器打开配置文件
 
   help                显示此帮助信息
 
 示例:
-  .\hs-connect.ps1 start
-  .\hs-connect.ps1 start -Port 10443 -Expiration 30d
-  .\hs-connect.ps1 link -Key <your-pre-auth-key>
+  .\msh.ps1 start
+  .\msh.ps1 start -Port 10443 -Expiration 30d
+  .\msh.ps1 link <your-pre-auth-key>
+  .\msh.ps1 config get
+  .\msh.ps1 config set SSH_USER new_user
 
 该工具会自动请求所需的管理员权限。首次运行时将引导您完成配置。
 "@
+}
+
+
+# --- 脚本入口 ---
+# --- 新增: 配置管理函数 ---
+function Handle-ConfigCommand {
+    param (
+        [string]$SubCommand,
+        [string]$Key,
+        [string]$Value
+    )
+
+    # 对于 config 命令，我们只需要加载配置，不需要执行其他检查
+    Load-Config
+
+    switch ($SubCommand) {
+        'get' {
+            if (-not [string]::IsNullOrWhiteSpace($Key)) {
+                # 显示单个配置
+                if ($Global:Config.PSObject.Properties.Name -contains $Key) {
+                    $Global:Config.$Key
+                } else {
+                    Write-Error "❌ 错误: 配置项 '$Key' 不存在。"
+                }
+            } else {
+                # 显示所有配置
+                Write-Host "当前配置 ($ConfigFile):"
+                $Global:Config | ConvertTo-Json -Depth 3
+            }
+        }
+        'set' {
+            # 参数验证已由 ParameterSetName 处理，这里主要是健壮性检查
+            if (-not ($Global:Config.PSObject.Properties.Name -contains $Key)) {
+                Write-Error "❌ 错误: 配置项 '$Key' 不存在于 '$ConfigFile' 中。"
+                exit 1
+            }
+
+            $Global:Config.$Key = $Value
+            $Global:Config | ConvertTo-Json -Depth 3 | Set-Content -Path $ConfigFile -Encoding UTF8
+            Write-Host "✅ 配置已更新: $Key -> $Value" -ForegroundColor Green
+        }
+        'edit' {
+            Write-Host "-> 正在使用默认程序打开配置文件..."
+            Invoke-Item $ConfigFile
+        }
+    }
 }
 
 

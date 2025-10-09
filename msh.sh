@@ -527,11 +527,78 @@ show_help() {
     echo "  help                显示此帮助信息"
     echo ""
     echo "示例:"
-    echo "  hs-connect start"
-    echo "  hs-connect start --port 10443 --expiration 30d"
-    echo "  hs-connect link <your-pre-auth-key>"
+    echo "  msh start"
+    echo "  msh start --port 10443 --expiration 30d"
+    echo "  msh link <your-pre-auth-key>"
+    echo "  msh config get"
+    echo "  msh config set SSH_USER new_user"
     echo ""
     echo "该工具会自动使用 sudo 获取所需权限。首次运行时将引导您完成配置。"
+}
+
+# 管理配置
+handle_config_command() {
+    local sub_command="$1"
+    shift
+
+    # 确保配置文件存在，如果不存在，则提示用户先运行一次 start
+    if [ ! -f "$USER_CONFIG_FILE" ]; then
+        echo "❌ 错误: 配置文件 '$USER_CONFIG_FILE' 不存在。"
+        echo "   -> 请先至少运行一次 'msh start' 来生成初始配置。"
+        exit 1
+    fi
+
+    case "$sub_command" in
+        get)
+            local key_to_get="$1"
+            if [ -n "$key_to_get" ]; then
+                # 获取单个值
+                grep "^${key_to_get}=" "$USER_CONFIG_FILE" | cut -d'=' -f2 | sed 's/"//g'
+            else
+                # 显示所有配置
+                echo "当前配置 ($USER_CONFIG_FILE):"
+                grep -v '^\s*#\|^\s*$' "$USER_CONFIG_FILE"
+            fi
+            ;;
+        set)
+            local key_to_set="$1"
+            local value_to_set="$2"
+            if [ -z "$key_to_set" ] || [ -z "$value_to_set" ]; then
+                echo "❌ 错误: 'set' 命令需要 key 和 value 两个参数。"
+                echo "   -> 用法: msh config set <KEY> <VALUE>"
+                exit 1
+            fi
+
+            # 检查 key 是否存在于文件中
+            if ! grep -q "^${key_to_set}=" "$USER_CONFIG_FILE"; then
+                echo "❌ 错误: 配置项 '$key_to_set' 不存在于 '$USER_CONFIG_FILE' 中。"
+                exit 1
+            fi
+
+            # 使用 sed 进行替换。-i 表示直接修改文件。
+            # 使用 | 作为分隔符，以避免 value 中包含 / 导致的问题。
+            sed -i "s|^${key_to_set}=.*|${key_to_set}=\"${value_to_set}\"|" "$USER_CONFIG_FILE"
+            echo "✅ 配置已更新: ${key_to_set} -> ${value_to_set}"
+            ;;
+        edit)
+            # 使用 $EDITOR 环境变量，如果不存在则回退到 vim 或 nano
+            local editor="${EDITOR:-vim}"
+            if ! command -v "$editor" &> /dev/null; then
+                editor="nano"
+            fi
+            if ! command -v "$editor" &> /dev/null; then
+                echo "❌ 错误: 无法找到 'vim' 或 'nano' 编辑器。"
+                exit 1
+            fi
+            echo "-> 正在使用 '$editor' 打开配置文件..."
+            "$editor" "$USER_CONFIG_FILE"
+            ;;
+        *)
+            echo "❌ 错误: 未知的 config 命令 '$sub_command'"
+            echo "   -> 用法: msh config [get|set|edit]"
+            exit 1
+            ;;
+    esac
 }
 
 # 根据用户输入的参数执行操作
@@ -554,6 +621,9 @@ main() {
             ;;
         link)
             link_node "$@"
+            ;;
+        config)
+            handle_config_command "$@"
             ;;
         h|help|-h|--help)
             show_help
