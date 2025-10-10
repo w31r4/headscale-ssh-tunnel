@@ -160,12 +160,73 @@ get_auth_key() {
     return 0
 }
 
+# 检查端口是否可用
+check_port_availability() {
+    local port=$1
+    if nc -z 127.0.0.1 "$port" &>/dev/null; then
+        return 1 # 端口被占用
+    fi
+    return 0 # 端口可用
+}
+
+# 查找可用端口
+find_available_port() {
+    local preferred_port=$1
+    local start_port=$2
+    local end_port=$3
+    
+    # 首先检查首选端口
+    if check_port_availability "$preferred_port"; then
+        echo "$preferred_port"
+        return 0
+    fi
+    
+    # 在指定范围内查找可用端口
+    for ((port=start_port; port<=end_port; port++)); do
+        if check_port_availability "$port"; then
+            echo "$port"
+            return 0
+        fi
+    done
+    
+    echo "0"
+    return 1
+}
+
 start_tunnel() {
     local port=${1:-$TUNNEL_PORT} # 优先使用参数，否则使用配置
     port=${port:-443}
 
     echo ""
-    echo "--- 第2步: 启动 SSH 隧道 (端口: $port) ---"
+    echo "--- 第2步: 启动 SSH 隧道 (首选端口: $port) ---"
+    
+    # 检查端口可用性
+    if ! check_port_availability "$port"; then
+        echo "   -> 警告：端口 $port 已被占用"
+        
+        # 尝试查找替代端口
+        local alt_port
+        if [[ "$port" -eq 443 ]]; then
+            alt_port=$(find_available_port 10443 10443 10453)
+        else
+            alt_port=$(find_available_port $((port + 1)) $((port + 1)) $((port + 10)))
+        fi
+        
+        if [[ "$alt_port" != "0" ]]; then
+            echo "   -> 找到可用端口: $alt_port"
+            read -p "   -> 是否使用端口 $alt_port 继续? (Y/n): " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                echo "   -> 操作已取消，请手动指定其他端口"
+                return 1
+            fi
+            port="$alt_port"
+        else
+            echo "   -> 错误：在常用端口范围内未找到可用端口"
+            echo "   -> 请手动指定其他端口或释放占用端口"
+            return 1
+        fi
+    fi
     
     echo "   -> 正在后台启动 SSH 隧道..."
     # 使用 -f 将 ssh 转入后台，-N 不执行远程命令，-o ExitOnForwardFailure=yes 如果端口无法监听则失败
@@ -226,9 +287,41 @@ activate_node() {
     fi
     
     echo "   -> 正在使用登录服务器: $login_server"
-    tailscale up --login-server="$login_server" --authkey="$AUTH_KEY" --accept-routes
+    
+    # 预先测试端口连通性
+    echo "   -> 正在测试端口 $tunnel_port 的连通性..."
+    if ! nc -z 127.0.0.1 "$tunnel_port" &>/dev/null; then
+        echo "❌ 错误: 无法连接到本地端口 $tunnel_port"
+        echo "   -> 可能的原因:"
+        echo "      1. Windows上的SSH隧道未启动或已停止"
+        echo "      2. 使用了错误的端口号"
+        echo "      3. Windows防火墙阻止了连接"
+        echo "   -> 解决方案:"
+        echo "      1. 在Windows上重新启动SSH隧道: .\\msh.ps1 start"
+        echo "      2. 检查Windows上的实际端口: .\\msh.ps1 status"
+        echo "      3. 手动指定正确端口: msh activate --port <正确端口>"
+        return 1
+    fi
+    
+    echo "   -> 端口连通性测试通过，正在激活节点..."
+    
+    # 执行tailscale激活，并捕获错误输出
+    local tailscale_output
+    local tailscale_error
+    
+    # 首先尝试正常激活
+    tailscale_output=$(tailscale up --login-server="$login_server" --authkey="$AUTH_KEY" --accept-routes 2>&1)
+    tailscale_error=$?
 
-    if tailscale ip -4 &>/dev/null; then
+    # 检查是否需要强制重新认证
+    if [[ $tailscale_error -ne 0 ]] && echo "$tailscale_output" | grep -q "can't change --login-server without --force-reauth"; then
+        echo "   -> 检测到登录服务器变更，正在强制重新认证..."
+        tailscale_output=$(tailscale up --login-server="$login_server" --authkey="$AUTH_KEY" --accept-routes --force-reauth 2>&1)
+        tailscale_error=$?
+    fi
+
+    # 检查是否成功激活
+    if [[ $tailscale_error -eq 0 ]] && tailscale ip -4 &>/dev/null; then
          local TS_IP=$(tailscale ip -4)
          echo ""
          echo "✅ 恭喜！Headscale 节点已成功激活并在线！"
@@ -237,7 +330,19 @@ activate_node() {
          return 0
     else
          echo ""
-         echo "❌ 激活失败。请检查 tailscale 日志 (sudo journalctl -u tailscaled -n 50)。"
+         echo "❌ 激活失败。"
+         echo "   -> 错误详情:"
+         if [[ -n "$tailscale_output" ]]; then
+             echo "$tailscale_output" | sed 's/^/      /'
+         fi
+         echo ""
+         echo "   -> 故障排查建议:"
+         echo "      1. 检查Windows上的SSH隧道状态: .\\msh.ps1 status"
+         echo "      2. 验证预授权密钥是否有效（可能已过期）"
+         echo "      3. 检查tailscale服务状态: sudo systemctl status tailscaled"
+         echo "      4. 查看详细日志: sudo journalctl -u tailscaled -n 50"
+         echo "      5. 确认Windows和WSL的网络配置正确"
+         echo "      6. 尝试手动强制重新认证: tailscale up --force-reauth"
          return 1
     fi
 }
@@ -287,14 +392,73 @@ start_and_activate() {
     fi
 }
 
+# 智能检测Windows隧道端口
+detect_windows_tunnel_port() {
+    # 静默检测，只返回端口号
+    local port=0
+    
+    # 1. 首先检查PID文件（如果存在）
+    if [ -f "$PID_FILE" ]; then
+        local pid_info
+        pid_info=$(cat "$PID_FILE")
+        local file_port=${pid_info#*:}
+        if [ -n "$file_port" ] && nc -z 127.0.0.1 "$file_port" &>/dev/null; then
+            echo "$file_port"
+            return 0
+        fi
+    fi
+    
+    # 2. WSL镜像模式下的简单端口检测
+    # 在WSL镜像模式下，Windows的localhost端口可以直接访问
+    local common_ports=(443 10443 8443 9443 11443 9443 8080 8888)
+    for port in "${common_ports[@]}"; do
+        if nc -z 127.0.0.1 "$port" &>/dev/null; then
+            # 在WSL镜像模式下，只要有端口监听就认为是SSH隧道
+            echo "$port"
+            return 0
+        fi
+    done
+    
+    # 3. 使用ss/netstat作为备选方案
+    if command -v ss &>/dev/null; then
+        local ss_ports
+        ss_ports=$(ss -tlnp 2>/dev/null | grep : | grep -E 'ssh|ssh.exe' | sed 's/.*:\([0-9]\+\).*/\1/' | sort -u)
+        if [ -n "$ss_ports" ]; then
+            local first_port=$(echo "$ss_ports" | head -n1)
+            echo "$first_port"
+            return 0
+        fi
+    fi
+    
+    # 4. 使用netstat作为最后备选
+    if command -v netstat &>/dev/null; then
+        local netstat_ports
+        netstat_ports=$(netstat -tlnp 2>/dev/null | grep : | grep -E 'ssh|ssh.exe' | sed 's/.*:\([0-9]\+\).*/\1/' | sort -u)
+        if [ -n "$netstat_ports" ]; then
+            local first_port=$(echo "$netstat_ports" | head -n1)
+            echo "$first_port"
+            return 0
+        fi
+    fi
+    
+    echo "0"
+    return 1
+}
+
 # 只激活，不创建隧道
 activate_only() {
     local expiration="8h"
-    # 解析参数
+    local manual_port=""
+    
+    # 解析参数 - 新增端口支持
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --expiration)
                 expiration="$2"
+                shift 2
+                ;;
+            --port)
+                manual_port="$2"
                 shift 2
                 ;;
             *)
@@ -308,8 +472,53 @@ activate_only() {
     if ! get_auth_key "$expiration"; then
         exit 1
     fi
+    
+    # 确定使用哪个端口
+    local tunnel_port
+    
+    if [[ -n "$manual_port" ]]; then
+        # 手动指定端口
+        tunnel_port="$manual_port"
+        echo "   -> 使用手动指定的端口: $tunnel_port"
+        
+        # 验证端口是否可用
+        if ! nc -z 127.0.0.1 "$tunnel_port" &>/dev/null; then
+            echo "❌ 错误: 指定的端口 $tunnel_port 无法连接"
+            echo "   -> 请确保Windows上的SSH隧道正在该端口运行"
+            exit 1
+        fi
+    else
+        # 自动检测端口
+        echo "--- 第0步: 自动检测Windows SSH隧道端口 ---"
+        local detected_port
+        
+        # 尝试静默检测
+        detected_port=$(detect_windows_tunnel_port 2>/dev/null | tail -n1)
+        
+        # 验证检测结果是否为有效数字
+        if [[ "$detected_port" =~ ^[0-9]+$ ]] && [[ "$detected_port" -gt 0 ]]; then
+            tunnel_port="$detected_port"
+            echo "   -> 检测到Windows SSH隧道在端口: $tunnel_port"
+        else
+            echo "❌ 错误: 未检测到活动的SSH隧道"
+            echo ""
+            echo "   -> 快速解决方案:"
+            echo "      1. 在Windows上启动隧道: .\\msh.ps1 start --port 9443"
+            echo "      2. 手动指定端口激活: msh activate --port 9443"
+            echo ""
+            echo "   -> 故障排查:"
+            echo "      - 在Windows上运行: .\\msh.ps1 status"
+            echo "      - 检查Windows端口: netstat -an | findstr 9443"
+            echo "      - 设置默认端口: msh config set TUNNEL_PORT 9443"
+            echo ""
+            echo "   -> 已知工作端口: 443, 10443, 8443, 9443, 11443"
+            exit 1
+        fi
+    fi
+    
+    echo "   -> 将使用端口 $tunnel_port 进行激活"
 
-    if ! activate_node; then
+    if ! activate_node "$tunnel_port"; then
         exit 1
     fi
 }
@@ -451,6 +660,8 @@ check_status() {
     running_port=$(is_tunnel_running "verbose")
     if [[ "$running_port" -eq 0 ]]; then
         echo "❌ SSH 隧道: 未运行"
+        echo "   -> 提示: 如果在WSL中使用，请先在Windows上启动隧道"
+        echo "      Windows: .\\msh.ps1 start  [--port 10443]"
     fi
 
     # 2. 检查 Tailscale 节点状态
@@ -463,6 +674,25 @@ check_status() {
         tailscale status
     else
         echo "❌ Tailscale 节点: 离线或未激活"
+        echo "   -> 提示: 如果SSH隧道已运行但节点离线，尝试:"
+        echo "      msh activate  # 自动检测端口并激活"
+        echo "      或"
+        echo "      msh activate --port <隧道端口>  # 手动指定端口"
+    fi
+    
+    # 3. 显示Windows + WSL协作状态
+    echo ""
+    echo "--- Windows + WSL 协作状态 ---"
+    local windows_ports
+    windows_ports=$(detect_windows_tunnel_port 2>/dev/null)
+    if [[ "$windows_ports" != "0" ]]; then
+        echo "✅ 检测到Windows SSH隧道在端口: $windows_ports"
+        echo "   -> 可以在WSL中使用: msh activate"
+    else
+        echo "❌ 未检测到Windows SSH隧道"
+        echo "   -> 如果需要在WSL中激活，请先:"
+        echo "      1. 在Windows上启动隧道: .\\msh.ps1 start"
+        echo "      2. 在WSL中激活: msh activate"
     fi
 }
 
@@ -504,9 +734,10 @@ is_tunnel_running() {
 
 # 显示帮助信息
 show_help() {
-    echo "msh (Matryoshka-SHell): Headscale SSH 隧道连接工具 (v4.0)"
+    echo "msh (Matryoshka-SHell): Headscale SSH 隧道连接工具 (v4.1 - 智能端口检测版)"
     echo ""
     echo "一个通过 SSH 隧道安全连接到 Headscale 的命令行工具。"
+    echo "支持智能检测Windows隧道端口，解决WSL协作中的端口匹配问题。"
     echo ""
     echo "用法:"
     echo "  msh <command> [options]"
@@ -520,18 +751,32 @@ show_help() {
     echo "  status              检查隧道和节点的当前连接状态"
     echo ""
     echo "  activate            仅获取密钥并激活节点 (用于共享已存在的隧道)"
+    echo "    --port <端口>     手动指定Windows隧道的端口 (用于非默认端口)"
     echo "    --expiration <时长> 临时指定预授权密钥的有效期"
+    echo "    注意: 会自动检测Windows上的SSH隧道端口"
     echo ""
     echo "  link <密钥>         使用已有的密钥激活节点 (如果隧道不存在会自动启动)"
     echo "    --port <端口>     在自动启动隧道时指定端口"
     echo "  help                显示此帮助信息"
     echo ""
+    echo "Windows + WSL 协作模式:"
+    echo "  1. 在Windows上:  .\\msh.ps1 start  [--port 10443]"
+    echo "  2. 在WSL中:      msh activate    [--port 10443]"
+    echo "  注意: WSL会自动检测Windows上的隧道端口"
+    echo ""
     echo "示例:"
-    echo "  msh start"
-    echo "  msh start --port 10443 --expiration 30d"
-    echo "  msh link <your-pre-auth-key>"
-    echo "  msh config get"
-    echo "  msh config set SSH_USER new_user"
+    echo "  msh start                                    # 启动隧道并激活"
+    echo "  msh start --port 10443 --expiration 30d     # 指定端口和有效期"
+    echo "  msh activate                                # 自动检测端口并激活"
+    echo "  msh activate --port 10443                   # 手动指定端口激活"
+    echo "  msh link <your-pre-auth-key>                # 使用已有密钥激活"
+    echo "  msh config get TUNNEL_PORT                  # 查看当前端口配置"
+    echo "  msh config set TUNNEL_PORT 10443            # 设置默认端口"
+    echo ""
+    echo "故障排查:"
+    echo "  msh status                                   # 检查隧道状态"
+    echo "  msh activate --port 10443                    # 手动指定端口"
+    echo "  netstat -tlnp | grep ssh                     # 查看SSH监听端口"
     echo ""
     echo "该工具会自动使用 sudo 获取所需权限。首次运行时将引导您完成配置。"
 }

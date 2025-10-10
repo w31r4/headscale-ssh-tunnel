@@ -1,4 +1,4 @@
-# msh (Matryoshka-SHell) - Headscale SSH 隧道连接工具 (v4.0)
+# msh (Matryoshka-SHell) - Headscale SSH 隧道连接工具 (v4.1 - 智能端口检测版)
 
 本项目提供一个名为 `msh` 的命令行工具，用于在无法直接进行 TLS 连接到 Headscale 服务器的情况下，通过建立 SSH 隧道来安全地注册和连接 Tailscale 节点。
 
@@ -42,6 +42,7 @@
     在运行安装脚本之前，您需要先为其添加可执行权限：
     ```bash
     chmod +x install.sh
+    chmod +x msh.sh  # 主脚本也需要可执行权限
     ```
 
 3.  **运行安装脚本**
@@ -175,8 +176,10 @@ sudo ./uninstall.sh
     *(工具会自动检查该配置是否存在)*
     **注意**: 如果您使用自定义端口（例如在 WSL 中），此步骤依然是必需的，因为 Tailscale 客户端需要通过域名来验证 TLS 证书。
 
-2.  **配置 `TUNNEL_PORT` (可选)**:
-    在首次运行时，配置向导会提示您输入 `TUNNEL_PORT`，默认为 `443`。如果您在标准 Linux 环境下运行，直接回车即可。如果您在 WSL2 的 `mirrored` 网络模式下运行，建议设置为一个大于 1024 的端口，例如 `10443`。
+2.  **配置 `TUNNEL_PORT` (推荐)**:
+    在首次运行时，配置向导会提示您输入 `TUNNEL_PORT`，默认为 `443`。**v4.1 建议**:
+    - 标准 Linux 环境：使用默认的 443 端口
+    - WSL2 的 `mirrored` 网络模式：建议设置为 `10443`，避免权限和冲突问题
 
 2.  **配置 SSH 免密登录**：
     确保您可以从本地机器通过 SSH 密钥免密码登录到您的 Headscale 服务器。
@@ -207,3 +210,17 @@ sudo ./uninstall.sh
   -> 请检查：
     1.  本地的 `443` 端口是否已被其他程序占用 (`sudo lsof -i:443`)。
     2.  服务器的防火墙是否允许 SSH 连接。
+    3.  **v4.1 新增**: 尝试使用其他端口，如 `msh start --port 10443`
+
+- **错误：无法连接到 Windows 上的 SSH 隧道**
+  -> **v4.1 解决方案**：
+    1.  在 Windows 上检查隧道状态：`.\msh.ps1 status`
+    2.  在 WSL 中手动指定端口：`msh activate --port 10443`
+    3.  检查端口连通性：`nc -z 127.0.0.1 10443`
+    4.  查看 SSH 监听端口：`sudo lsof -i -P -n | grep LISTEN | grep ssh`
+
+- **错误：未检测到活动的 SSH 隧道**
+  -> **v4.1 智能检测**:
+    1.  确保 Windows 隧道已启动：`.\msh.ps1 start`
+    2.  使用手动端口指定：`msh activate --port 10443`
+    3.  检查防火墙设置，确保允许本地连接

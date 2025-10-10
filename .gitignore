@@ -1,2 +1,3 @@
 # 忽略本地配置文件
 config.sh
+PORT_DETECTION_GUIDE.md
